@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include "CommonTypes.hpp" // VideoFrame の定義はここにあるものを使用
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -20,14 +21,6 @@ extern "C" {
 struct BgaEvent {
     long long y;
     int id;
-};
-
-struct VideoFrame {
-    uint8_t* yBuf = nullptr;
-    uint8_t* uBuf = nullptr;
-    uint8_t* vBuf = nullptr;
-    int yStride, uStride, vStride;
-    double pts;
 };
 
 class BgaManager {
@@ -53,10 +46,6 @@ public:
 private:
     void videoWorker();
 
-    // 静的メンバ（全インスタンスで共通のプールを使う場合）
-    static std::deque<VideoFrame> freeQueue;
-    static uint8_t* frameMemoryPool;
-
     std::unordered_map<int, SDL_Texture*> textures;
     std::unordered_map<int, std::string> idToFilename;
     std::string baseDir;
@@ -66,6 +55,8 @@ private:
     bool showPoor = false;
 
     bool isVideoMode = false;
+    bool hasNewFrameToUpload = false; // ★コンパイルエラー解消に必須
+    
     SDL_Texture* videoTexture = nullptr;
     AVFormatContext* pFormatCtx = nullptr;
     AVCodecContext* pCodecCtx = nullptr;
@@ -78,7 +69,13 @@ private:
     std::atomic<double> sharedVideoElapsed{0.0};
     
     std::deque<VideoFrame> frameQueue;
-    const size_t MAX_FRAME_QUEUE = 60;
+    // Switchのメモリ事情に合わせて調整（256pxなら20-30でも十分）
+    const size_t MAX_FRAME_QUEUE = 30; 
+
+    // ★メモリ断片化を防ぐための固定プール用vector
+    std::vector<uint8_t> memoryPoolY;
+    std::vector<uint8_t> memoryPoolU;
+    std::vector<uint8_t> memoryPoolV;
 };
 
 #endif

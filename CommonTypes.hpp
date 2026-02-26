@@ -38,7 +38,11 @@ struct PlayableNote {
     double target_ms; 
     int64_t y;
     int lane; 
-    std::string channel_name; 
+    
+    // ★最優先修正：std::string channel_name を廃止し、数値IDにする
+    // ロード時に SoundManager 等で "piano1.wav" -> 123 のように変換しておく
+    uint32_t soundId = 0; 
+
     bool played = false; 
     bool isBGM = false; 
 
@@ -48,6 +52,9 @@ struct PlayableNote {
     double duration_ms = 0;
     bool isBeingPressed = false;
     bool end_processed = false;
+
+    // 構造体のサイズを固定（Trivially Copyable）に保つことで、
+    // メモリコピーの速度を極限まで高め、キャッシュヒット率を改善する
 };
 
 /**
@@ -133,6 +140,20 @@ struct BestScore {
     bool isClear = false;
 
     std::vector<float> gaugeHistory;
+};
+
+// VideoFrame 構造体を以下のように更新してください
+struct VideoFrame {
+    double pts = -1.0;
+    
+    // ポインタ経由でのアクセス用
+    uint8_t* yPtr = nullptr;
+    uint8_t* uPtr = nullptr;
+    uint8_t* vPtr = nullptr;
+
+    int yStride = 0;
+    int uStride = 0;
+    int vStride = 0;
 };
 
 #endif

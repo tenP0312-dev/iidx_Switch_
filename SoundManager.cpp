@@ -59,7 +59,8 @@ void SoundManager::preloadBoxIndex(const std::string& rootPath, const std::strin
 }
 
 void SoundManager::loadSingleSound(const std::string& filename, const std::string& rootPath, const std::string& bmsonName) {
-    if (sounds.find(filename) != sounds.end()) return;
+    uint32_t id = getHash(filename); // ID生成
+    if (sounds.find(id) != sounds.end()) return;
 
     if (boxIndex.count(filename)) {
         auto& entry = boxIndex[filename];
@@ -74,7 +75,7 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
             SDL_RWops* rw = SDL_RWFromMem(buffer.data(), entry.size);
             Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
             if (chunk) {
-                sounds[filename] = chunk;
+                sounds[id] = chunk; // IDで保存
                 currentTotalMemory += entry.size;
             }
             return; 
@@ -93,7 +94,7 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
 
     Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1);
     if (chunk) {
-        sounds[filename] = chunk;
+        sounds[id] = chunk; // IDで保存
         currentTotalMemory += fileSize;
     }
 }
@@ -107,7 +108,7 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     std::vector<std::string> externalFiles;
 
     for (const auto& name : filenames) {
-        if (sounds.find(name) != sounds.end()) continue;
+        if (sounds.find(getHash(name)) != sounds.end()) continue; // IDで判定
 
         if (boxIndex.count(name)) {
             groupPerBox[boxIndex[name].pckPath].push_back(name);
@@ -140,7 +141,7 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
             SDL_RWops* rw = SDL_RWFromMem(buffer.data(), entry.size);
             Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1);
             if (chunk) {
-                sounds[name] = chunk;
+                sounds[getHash(name)] = chunk; // IDで保存
                 currentTotalMemory += entry.size;
             }
 
@@ -161,9 +162,10 @@ void SoundManager::play(int channel_id) {
     // Not used in current implementation
 }
 
-void SoundManager::playByName(const std::string& name) {
-    if (sounds.count(name) && sounds[name] != nullptr) {
-        Mix_Chunk* targetChunk = sounds[name];
+void SoundManager::play(int soundId) { 
+    uint32_t id = static_cast<uint32_t>(soundId);
+    if (sounds.count(id) && sounds[id] != nullptr) {
+        Mix_Chunk* targetChunk = sounds[id];
         int newChannel = Mix_PlayChannel(-1, targetChunk, 0);
 
         if (newChannel == -1) {
@@ -176,9 +178,13 @@ void SoundManager::playByName(const std::string& name) {
 
         if (newChannel != -1) {
             Mix_Volume(newChannel, 96);
-            activeChannels[name] = newChannel;
+            activeChannels[id] = newChannel;
         }
     }
+}
+
+void SoundManager::playByName(const std::string& name) {
+    play(static_cast<int>(getHash(name)));
 }
 
 void SoundManager::playPreview(const std::string& fullPath) {

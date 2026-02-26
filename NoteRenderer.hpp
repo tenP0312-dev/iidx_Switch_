@@ -7,36 +7,44 @@
 #include <unordered_map>
 #include <list>
 #include <vector>
+#include <map>
 #include "BmsonLoader.hpp"
 #include "CommonTypes.hpp"
 
 /**
- * @brief キャッシュキー構造体: 文字列結合を排除するためのデータ指向設計
+ * @brief テクスチャとサイズ情報をペアで管理し、SDL_QueryTextureを不要にする
  */
+struct TextureRegion {
+    SDL_Texture* texture = nullptr;
+    int w = 0;
+    int h = 0;
+
+    // if (region) でテクスチャの有無を確認できるようにする
+    explicit operator bool() const { return texture != nullptr; }
+
+    void reset() {
+        if (texture) SDL_DestroyTexture(texture);
+        texture = nullptr;
+        w = h = 0;
+    }
+};
+
+// --- キャッシュキーとハッシュ関数 (変更なし) ---
 struct TextCacheKey {
     std::string text;
     uint32_t color_rgba;
     bool isBig;
     std::string fontPath;
-
     bool operator==(const TextCacheKey& other) const {
-        return color_rgba == other.color_rgba &&
-               isBig == other.isBig &&
-               text == other.text &&
-               fontPath == other.fontPath;
+        return color_rgba == other.color_rgba && isBig == other.isBig && text == other.text && fontPath == other.fontPath;
     }
 };
 
-/**
- * @brief TextCacheKey用のハッシュ関数
- */
 struct TextCacheKeyHash {
     std::size_t operator()(const TextCacheKey& k) const {
         std::size_t h = std::hash<std::string>{}(k.text);
-        // FNV-1a的な結合
         h ^= std::hash<uint32_t>{}(k.color_rgba) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= std::hash<bool>{}(k.isBig) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        if(!k.fontPath.empty()) h ^= std::hash<std::string>{}(k.fontPath);
         return h;
     }
 };
@@ -51,7 +59,7 @@ public:
     void drawTextCached(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter = false, bool isRight = false, const std::string& fontPath = "");
     void drawImage(SDL_Renderer* ren, const std::string& path, int x, int y, int w, int h, int alpha = 255);
     
-    // シグネチャ変更：PlayableNote を const 参照で受ける（コピー抑制）
+    // PlayableNote を const 参照で受ける (コピー根絶)
     void renderNote(SDL_Renderer* ren, const PlayableNote& note, double cur_ms, double speed, bool isAuto = false);
     
     void renderBackground(SDL_Renderer* ren);
@@ -71,7 +79,6 @@ private:
     TTF_Font* fontSmall = nullptr;
     TTF_Font* fontBig = nullptr;
 
-    // LRUキャッシュ用データ構造
     struct CacheEntry {
         SDL_Texture* texture;
         int w, h;
@@ -79,27 +86,29 @@ private:
     };
     std::unordered_map<TextCacheKey, CacheEntry, TextCacheKeyHash> textTextureCache;
     std::list<TextCacheKey> lruList;
-    const size_t MAX_TEXT_CACHE = 256; // 128から倍増（LRUなので安全）
+    const size_t MAX_TEXT_CACHE = 256;
 
-    std::map<std::string, SDL_Texture*> textureCache;
+    std::map<std::string, TextureRegion> textureCache; // mapの中身もサイズ持ちにする
     std::map<std::string, TTF_Font*> customFontCache;
 
-    // --- テクスチャ群 ---
-    SDL_Texture *lane_Flame = nullptr, *lane_Flame2 = nullptr;
-    SDL_Texture *texBackground = nullptr;
-    SDL_Texture *texNoteWhite = nullptr, *texNoteBlue = nullptr, *texNoteRed = nullptr;
-    SDL_Texture *texNoteWhite_LN = nullptr, *texNoteWhite_LN_Active1 = nullptr, *texNoteWhite_LN_Active2 = nullptr;
-    SDL_Texture *texNoteBlue_LN = nullptr, *texNoteBlue_LN_Active1 = nullptr, *texNoteBlue_LN_Active2 = nullptr;
-    SDL_Texture *texNoteRed_LN = nullptr, *texNoteRed_LN_Active1 = nullptr, *texNoteRed_LN_Active2 = nullptr;
-    SDL_Texture *texNoteWhite_LNS = nullptr, *texNoteWhite_LNE = nullptr;
-    SDL_Texture *texNoteBlue_LNS = nullptr, *texNoteBlue_LNE = nullptr;
-    SDL_Texture *texNoteRed_LNS = nullptr, *texNoteRed_LNE = nullptr;
-    SDL_Texture *texKeybeamWhite = nullptr, *texKeybeamBlue = nullptr, *texKeybeamRed = nullptr;
-    SDL_Texture *texJudgeAtlas = nullptr, *texNumberAtlas = nullptr;
-    std::vector<SDL_Texture*> texBombs;
-    SDL_Texture *texLaneCover = nullptr, *texGaugeAssist = nullptr, *texGaugeNormal = nullptr;
-    SDL_Texture *texGaugeHard = nullptr, *texGaugeExHard = nullptr, *texGaugeHazard = nullptr, *texGaugeDan = nullptr;
-    SDL_Texture *texKeys = nullptr, *tex_scratch = nullptr;
+    // --- テクスチャ群を TextureRegion に置き換え ---
+    TextureRegion lane_Flame, lane_Flame2;
+    TextureRegion texBackground;
+    TextureRegion texNoteWhite, texNoteBlue, texNoteRed;
+    TextureRegion texNoteWhite_LN, texNoteWhite_LN_Active1, texNoteWhite_LN_Active2;
+    TextureRegion texNoteBlue_LN, texNoteBlue_LN_Active1, texNoteBlue_LN_Active2;
+    TextureRegion texNoteRed_LN, texNoteRed_LN_Active1, texNoteRed_LN_Active2;
+    TextureRegion texNoteWhite_LNS, texNoteWhite_LNE;
+    TextureRegion texNoteBlue_LNS, texNoteBlue_LNE;
+    TextureRegion texNoteRed_LNS, texNoteRed_LNE;
+    TextureRegion texKeybeamWhite, texKeybeamBlue, texKeybeamRed;
+    TextureRegion texJudgeAtlas, texNumberAtlas;
+    std::vector<TextureRegion> texBombs;
+    TextureRegion texLaneCover, texGaugeAssist, texGaugeNormal, texGaugeHard, texGaugeExHard, texGaugeHazard, texGaugeDan;
+    TextureRegion texKeys, tex_scratch;
+
+    // ヘルパー: ロード時にサイズを自動取得して格納する
+    void loadAndCache(SDL_Renderer* ren, TextureRegion& region, const std::string& path);
 };
 
 #endif

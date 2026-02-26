@@ -23,7 +23,6 @@ void PlayEngine::init(const BMSData& data) {
     
     status = PlayStatus(); 
     notes.clear();
-    // メモリ再確保を防ぐため予約
     notes.reserve(data.header.totalNotes + 100);
     beatLines.clear();
     currentJudge = JudgmentDisplay();
@@ -31,7 +30,6 @@ void PlayEngine::init(const BMSData& data) {
     status.totalNotes = 0;
     status.maxTargetMs = 0;
 
-    // --- ランダムオプション等の適用 ---
     int laneMap[9];
     for (int i = 0; i <= 8; i++) laneMap[i] = i;
 
@@ -55,16 +53,17 @@ void PlayEngine::init(const BMSData& data) {
         int64_t y;
         int64_t l;
         int originalLane;
-        std::string channel_name;
+        uint32_t soundId; // string を ID に変更
         bool isBGM;
     };
     std::vector<TempNote> tempNotes;
     tempNotes.reserve(data.header.totalNotes * 2);
 
     for (const auto& ch : bmsData.sound_channels) {
+        uint32_t sId = std::hash<std::string>{}(ch.name); // ロード時に一度だけハッシュ化
         for (const auto& n : ch.notes) {
             bool isBGM = (n.x < 1 || n.x > 8);
-            tempNotes.push_back({n.y, n.l, (int)n.x, ch.name, isBGM});
+            tempNotes.push_back({n.y, n.l, (int)n.x, sId, isBGM});
         }
     }
 
@@ -79,7 +78,7 @@ void PlayEngine::init(const BMSData& data) {
         PlayableNote pn;
         pn.target_ms = projector.getMsFromY(tn.y);
         pn.y = tn.y;
-        pn.channel_name = tn.channel_name;
+        pn.soundId = tn.soundId; // IDを格納
         pn.isBGM = tn.isBGM;
 
         bool isLegacyModel = (Config::ASSIST_OPTION == 2 || Config::ASSIST_OPTION == 4 || Config::ASSIST_OPTION == 6);
@@ -149,10 +148,10 @@ void PlayEngine::init(const BMSData& data) {
     status.clearType = ClearType::NO_PLAY;
 
     nextUpdateIndex = 0;
-    for (int i = 0; i <= 8; i++) lastSoundPerLane[i] = "";
+    for (int i = 0; i <= 8; i++) lastSoundPerLaneId[i] = 0; // ID管理に変更
 
     status.gaugeHistory.clear();
-    status.gaugeHistory.reserve(1000); // グラフ用メモリ予約
+    status.gaugeHistory.reserve(1000); 
     lastHistoryUpdateMs = -1000.0; 
 }
 
@@ -164,7 +163,6 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
         lastHistoryUpdateMs = cur_ms;
     }
 
-    // nextUpdateIndex を使うことで、通過済みノーツのループをスキップ
     for (size_t i = nextUpdateIndex; i < notes.size(); ++i) {
         auto& n = notes[i];
         
@@ -176,18 +174,17 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
         if (n.target_ms > cur_ms + 500.0) break;
 
         if (!n.isBGM) {
-            lastSoundPerLane[n.lane] = n.channel_name;
+            lastSoundPerLaneId[n.lane] = n.soundId; // IDを保存
         }
 
         if (n.isBGM && n.target_ms <= cur_ms) {
-            snd.playByName(n.channel_name);
+            snd.play(n.soundId); // ID再生
             n.played = true;
         } 
         else if (!n.isBGM) {
             double adjusted_target = n.target_ms + Config::JUDGE_OFFSET;
             double end_ms = adjusted_target + (n.isLN ? n.duration_ms : 0);
             
-            // 見逃しPOOR判定
             if (cur_ms > end_ms + Config::JUDGE_POOR) {
                 n.played = true;
                 n.isBeingPressed = false;
@@ -206,7 +203,6 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
         }
     }
 
-    // クリア判定
     if (cur_ms > status.maxTargetMs + 1000.0) {
         if (!status.isFailed) {
             int opt = Config::GAUGE_OPTION;
@@ -253,8 +249,8 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
             continue; 
         }
 
-        snd.playByName(n.channel_name);
-        lastSoundPerLane[lane] = n.channel_name; 
+        snd.play(n.soundId); // ID再生
+        lastSoundPerLaneId[lane] = n.soundId; 
         
         if (n.isLN) {
             n.isBeingPressed = true;
@@ -304,8 +300,8 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
     }
 
     if (!hitSuccess) {
-        if (lane >= 1 && lane <= 8 && !lastSoundPerLane[lane].empty()) {
-            snd.playByName(lastSoundPerLane[lane]);
+        if (lane >= 1 && lane <= 8 && lastSoundPerLaneId[lane] != 0) {
+            snd.play(lastSoundPerLaneId[lane]); // ID再生
             if (Config::GAUGE_OPTION == 6) { // HAZARD
                 status.gauge = 0.0;
                 status.isFailed = true;
