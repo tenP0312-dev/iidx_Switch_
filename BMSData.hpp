@@ -51,6 +51,7 @@ struct BMSHeader {
 
     // --- 【追加：動画BGA対応】 ---
     std::string bga_video;    // 動画ファイルパス (.bga)
+    int64_t bga_offset = 0;   // 【追加】動画の再生開始位置 (pulse)
 };
 
 class BMSData {

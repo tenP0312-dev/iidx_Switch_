@@ -1,186 +1,120 @@
 #include "BgaManager.hpp"
-#include "Config.hpp" // レーン幅等を参照するために追加
+#include "Config.hpp"
 #include <SDL2/SDL_image.h>
 #include <iostream>
 #include <algorithm>
-#include <fstream>
-#include <map>
-#include <unordered_map>
 #include <cstring>
 #include <thread>
 
-// --- 定数の定義（モードにより使い分け） ---
+// --- 定数の定義 ---
 static const long long BMP_LOOK_AHEAD = 300000;
-static const long long BMP_KEEP_ALIVE = 300000;
-static const int BMP_LOAD_INTERVAL = 1;
-
-static const long long VIDEO_LOOK_AHEAD = 5000;
-static const long long VIDEO_KEEP_ALIVE = 5000;
-static const int VIDEO_LOAD_INTERVAL = 6;
 
 void BgaManager::init(size_t expectedSize) {
-    // 物理メモリの強制解放
-    std::unordered_map<int, SDL_Texture*>().swap(textures);
+    clear();
     textures.reserve(std::min((size_t)256, expectedSize));
-    
-    bgaEvents.clear();
-    layerEvents.clear();
-    poorEvents.clear();
-    
-    idToFilename.clear();
-    lastUsedPulse.clear();
-    
-    currentEventIndex = 0;
-    currentLayerIndex = 0;
-    currentPoorIndex = 0;
-    
-    lastDisplayedId = -1;
-    lastLayerId = -1;
-    lastPoorId = -1;
-    showPoor = false;
-
-    // --- 動画系初期化 ---
-    isVideoMode = false;
-    videoTexture = nullptr;
-    std::vector<uint8_t>().swap(videoData);
-    std::vector<uint8_t>().swap(nextVideoData);
-    std::vector<size_t>().swap(frameOffsets);
-    std::vector<size_t>().swap(nextFrameOffsets);
-    
-    videoTotalFrames = 0;
-    lastFrameIndex = -1;
-    videoStartMs = -1.0;
-    currentPartIndex = 1;
-    baseVideoPath = "";
-    totalFramesBeforeCurrentPart = 0;
-    
-    isLoading = false;
-    hasNextPartReady = false;
-    if (loaderThread.joinable()) loaderThread.join();
-
-    std::map<int, SDL_Texture*>().swap(videoCache);
-
-    std::cout << "[BGA] Hybrid Engine Init (BMP Stability + Video Support)." << std::endl;
-}
-
-void BgaManager::asyncLoadWorker(int partIdx) {
-    std::string path = baseVideoPath;
-    if (partIdx > 1) path += std::to_string(partIdx);
-
-    std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) {
-        isLoading = false;
-        return;
-    }
-
-    std::vector<uint8_t> tempData;
-    std::vector<size_t> tempOffsets;
-    uint32_t tempTotal;
-
-    ifs.read(reinterpret_cast<char*>(&tempTotal), 4);
-    uint32_t dummyW, dummyH;
-    ifs.read(reinterpret_cast<char*>(&dummyW), 4);
-    ifs.read(reinterpret_cast<char*>(&dummyH), 4);
-
-    ifs.seekg(0, std::ios::end);
-    size_t fileSize = ifs.tellg();
-    ifs.seekg(12, std::ios::beg);
-
-    tempData.resize(fileSize - 12);
-    ifs.read(reinterpret_cast<char*>(tempData.data()), tempData.size());
-
-    size_t currentPos = 0;
-    for (uint32_t i = 0; i < tempTotal; ++i) {
-        if (currentPos + 4 > tempData.size()) break;
-        tempOffsets.push_back(currentPos);
-        uint32_t fSize;
-        memcpy(&fSize, &tempData[currentPos], 4);
-        currentPos += 4 + fSize;
-    }
-
-    nextVideoData = std::move(tempData);
-    nextFrameOffsets = std::move(tempOffsets);
-    nextPartTotalFrames = tempTotal;
-
-    hasNextPartReady = true;
-    isLoading = false;
-}
-
-bool BgaManager::loadPart(int partIdx, SDL_Renderer* renderer) {
-    std::string path = baseVideoPath;
-    if (partIdx > 1) path += std::to_string(partIdx);
-
-    std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) return false;
-
-    for (auto& pair : videoCache) if (pair.second) SDL_DestroyTexture(pair.second);
-    std::map<int, SDL_Texture*>().swap(videoCache);
-    
-    std::vector<uint8_t>().swap(videoData);
-    std::vector<size_t>().swap(frameOffsets);
-
-    ifs.read(reinterpret_cast<char*>(&videoTotalFrames), 4);
-    ifs.read(reinterpret_cast<char*>(&videoW), 4);
-    ifs.read(reinterpret_cast<char*>(&videoH), 4);
-
-    ifs.seekg(0, std::ios::end);
-    size_t fileSize = ifs.tellg();
-    ifs.seekg(12, std::ios::beg);
-
-    videoData.resize(fileSize - 12);
-    ifs.read(reinterpret_cast<char*>(videoData.data()), videoData.size());
-
-    size_t currentPos = 0;
-    for (uint32_t i = 0; i < videoTotalFrames; ++i) {
-        if (currentPos + 4 > videoData.size()) break;
-        frameOffsets.push_back(currentPos);
-        uint32_t fSize;
-        memcpy(&fSize, &videoData[currentPos], 4);
-        currentPos += 4 + fSize;
-    }
-    return true;
 }
 
 bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
     std::string targetPath = path;
-    static const std::vector<std::string> videoExts = {
-        ".mp4", ".avi", ".wmv", ".mov", ".mkv", ".mpg", ".mpeg", ".flv", ".webm"
-    };
-    std::string lowerPath = targetPath;
-    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
-    for (const auto& ext : videoExts) {
-        size_t pos = lowerPath.rfind(ext);
-        if (pos != std::string::npos && pos == lowerPath.length() - ext.length()) {
-            targetPath.replace(pos, ext.length(), ".bga");
+    // Switch用のパス補正
+    if (targetPath.compare(0, 5, "sdmc:") == 0) targetPath.erase(0, 5);
+
+    // すでに再生中なら一旦リセット
+    if (isVideoMode) clear();
+
+    // 1. ファイルオープン
+    int err = avformat_open_input(&pFormatCtx, targetPath.c_str(), NULL, NULL);
+    if (err != 0) {
+        // フォールバック: ROOT/videos/ フォルダ内を探す
+        std::string filename = targetPath;
+        size_t lastSlash = targetPath.find_last_of("/\\");
+        if (lastSlash != std::string::npos) filename = targetPath.substr(lastSlash + 1);
+        
+        std::string fallbackPath = Config::ROOT_PATH;
+        if (!fallbackPath.empty() && fallbackPath.back() != '/' && fallbackPath.back() != '\\') fallbackPath += "/";
+        fallbackPath += "videos/" + filename;
+        if (fallbackPath.compare(0, 5, "sdmc:") == 0) fallbackPath.erase(0, 5);
+        
+        err = avformat_open_input(&pFormatCtx, fallbackPath.c_str(), NULL, NULL);
+    }
+    if (err != 0) return false;
+
+    // 2. ストリーム情報の取得
+    if (avformat_find_stream_info(pFormatCtx, NULL) < 0) return false;
+
+    // ビデオストリームの探索
+    videoStreamIdx = -1;
+    for (int i = 0; i < (int)pFormatCtx->nb_streams; i++) {
+        if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            videoStreamIdx = i;
             break;
         }
     }
+    if (videoStreamIdx == -1) return false;
 
-    baseVideoPath = targetPath;
-    currentPartIndex = 1;
-    totalFramesBeforeCurrentPart = 0;
+    // 3. デコーダーの設定
+    AVCodecParameters* pCodecPar = pFormatCtx->streams[videoStreamIdx]->codecpar;
+    const AVCodec* pCodec = avcodec_find_decoder(pCodecPar->codec_id);
+    if (!pCodec) return false;
 
-    if (loadPart(currentPartIndex, renderer)) {
-        isVideoMode = true;
-        // 初回フレームプリロード
-        if (!frameOffsets.empty()) {
-            size_t offset = frameOffsets[0];
-            uint32_t fSize;
-            memcpy(&fSize, &videoData[offset], 4);
-            SDL_RWops* rw = SDL_RWFromMem(&videoData[offset + 4], fSize);
-            if (rw) {
-                SDL_Texture* tex = IMG_LoadTexture_RW(renderer, rw, 1);
-                if (tex) videoCache[0] = tex;
-            }
-        }
-        return true;
+    pCodecCtx = avcodec_alloc_context3(pCodec);
+    avcodec_parameters_to_context(pCodecCtx, pCodecPar);
+    
+    // --- Switch最適化設定 ---
+    pCodecCtx->thread_count = 2; // デコード用スレッド数
+    pCodecCtx->flags2 |= AV_CODEC_FLAG2_FAST; // 高速化フラグ
+    pCodecCtx->workaround_bugs = 1;
+
+    if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0) return false;
+
+    // 4. SDLテクスチャとフレームの準備
+    pFrame = av_frame_alloc();
+    videoTexture = SDL_CreateTexture(renderer, 
+                                     SDL_PIXELFORMAT_IYUV, 
+                                     SDL_TEXTUREACCESS_STREAMING, 
+                                     pCodecCtx->width, 
+                                     pCodecCtx->height);
+
+    // 5. デコードスレッドの開始
+    quitThread = false;
+    isVideoMode = true;
+    
+    {
+        std::lock_guard<std::mutex> lock(frameMutex);
+        frameQueue.clear(); 
     }
-    return false;
+    
+    hasNewFrameToUpload = false;
+    
+    // スレッド起動
+    decodeThread = std::thread(&BgaManager::videoWorker, this);
+
+    // --- 修正: 事前ロード待機ロジック ---
+    // 目標: 再生開始前に 30枚 (約1秒分) をメモリに貯金する
+    // 最大 2秒間 (200 * 10ms) だけロード画面で待機
+    int waitCount = 0;
+    while (waitCount < 200) {
+        size_t currentSize = 0;
+        {
+            std::lock_guard<std::mutex> lock(frameMutex);
+            currentSize = frameQueue.size();
+        }
+
+        if (currentSize >= 60) {
+            // 十分に溜まったのでプレイ画面へ遷移
+            break; 
+        }
+
+        // 貯金が溜まるまで10msずつ待つ
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        waitCount++;
+    }
+
+    return true;
 }
 
 void BgaManager::preLoad(long long startPulse, SDL_Renderer* renderer) {
     if (isVideoMode) return; 
-
     int nextNeededId = -1;
     auto scan = [&](const std::vector<BgaEvent>& events) {
         for (const auto& ev : events) {
@@ -192,11 +126,7 @@ void BgaManager::preLoad(long long startPulse, SDL_Renderer* renderer) {
         }
         return false;
     };
-
-    if (!scan(bgaEvents)) {
-        if (!scan(layerEvents)) scan(poorEvents);
-    }
-
+    if (!scan(bgaEvents)) { if (!scan(layerEvents)) scan(poorEvents); }
     if (nextNeededId != -1 && idToFilename.count(nextNeededId)) {
         loadBmp(nextNeededId, baseDir + idToFilename[nextNeededId], renderer);
     }
@@ -204,238 +134,190 @@ void BgaManager::preLoad(long long startPulse, SDL_Renderer* renderer) {
 
 void BgaManager::loadBmp(int id, const std::string& fullPath, SDL_Renderer* renderer) {
     if (textures.count(id)) return;
-
-    // 動画モードでない場合、安定版の挙動を維持（無闇に削除しない）
-    if (!isVideoMode && textures.size() > 256) {
-        auto it = textures.begin();
-        if (it->second) SDL_DestroyTexture(it->second);
-        lastUsedPulse.erase(it->first);
-        textures.erase(it);
-    }
-
     SDL_Surface* surf = IMG_Load(fullPath.c_str());
-    if (!surf) surf = SDL_LoadBMP(fullPath.c_str());
     if (!surf) return;
-
-    SDL_Surface* optimized = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
     SDL_FreeSurface(surf);
-    if (!optimized) return;
+    if (tex) textures[id] = tex;
+}
 
-    SDL_SetColorKey(optimized, SDL_TRUE, SDL_MapRGB(optimized->format, 0, 0, 0));
-    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, optimized);
-    SDL_FreeSurface(optimized);
+void BgaManager::syncTime(double ms) {
+    sharedVideoElapsed.store(ms / 1000.0, std::memory_order_release);
+}
 
-    if (tex) {
-        textures[id] = tex;
-        lastUsedPulse[id] = 0;
+// --- 修正: バッファリングを行うワーカー ---
+void BgaManager::videoWorker() {
+    AVPacket packet;
+    while (!quitThread) {
+        // 1. キューが満杯なら少し待機 (Producer側の制御)
+        bool isFull = false;
+        {
+            std::lock_guard<std::mutex> lock(frameMutex);
+            isFull = (frameQueue.size() >= MAX_FRAME_QUEUE);
+        }
+        if (isFull) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+
+        // 2. デコード処理
+        if (av_read_frame(pFormatCtx, &packet) >= 0) {
+            if (packet.stream_index == videoStreamIdx) {
+                if (avcodec_send_packet(pCodecCtx, &packet) >= 0) {
+                    while (avcodec_receive_frame(pCodecCtx, pFrame) == 0) {
+                        int64_t pts = pFrame->best_effort_timestamp;
+                        if (pts == AV_NOPTS_VALUE) pts = 0;
+                        int64_t startTime = pFormatCtx->streams[videoStreamIdx]->start_time;
+                        if (startTime != AV_NOPTS_VALUE) pts -= startTime;
+                        
+                        double frameTime = pts * av_q2d(pFormatCtx->streams[videoStreamIdx]->time_base);
+
+                        // フレームデータをコピーして作成
+                        VideoFrame vFrame;
+                        vFrame.pts = frameTime;
+                        vFrame.yStride = pFrame->linesize[0];
+                        vFrame.uStride = pFrame->linesize[1];
+                        vFrame.vStride = pFrame->linesize[2];
+
+                        size_t ySize = pCodecCtx->height * vFrame.yStride;
+                        size_t uSize = (pCodecCtx->height / 2) * vFrame.uStride;
+                        size_t vSize = (pCodecCtx->height / 2) * vFrame.vStride;
+
+                        vFrame.yBuf.resize(ySize);
+                        vFrame.uBuf.resize(uSize);
+                        vFrame.vBuf.resize(vSize);
+
+                        memcpy(vFrame.yBuf.data(), pFrame->data[0], ySize);
+                        memcpy(vFrame.uBuf.data(), pFrame->data[1], uSize);
+                        memcpy(vFrame.vBuf.data(), pFrame->data[2], vSize);
+
+                        // キューに追加
+                        {
+                            std::lock_guard<std::mutex> lock(frameMutex);
+                            frameQueue.push_back(std::move(vFrame));
+                        }
+                    }
+                }
+            }
+            av_packet_unref(&packet);
+        } else {
+            // ループ再生
+            av_seek_frame(pFormatCtx, videoStreamIdx, 0, AVSEEK_FLAG_BACKWARD);
+            avcodec_flush_buffers(pCodecCtx);
+            {
+                std::lock_guard<std::mutex> lock(frameMutex);
+                frameQueue.clear(); // ループ時はキューをクリアしてリセット
+            }
+        }
     }
 }
 
+// --- 修正: キューから取り出して描画 ---
 void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, int y, double cur_ms) {
-    // --- 修正箇所: レーン幅とサイドに基づいた動的な位置計算 ---
+    // 1. 座標計算
     int sw = Config::SCRATCH_WIDTH;
     int lw = Config::LANE_WIDTH;
-    int totalWidth = (7 * lw) + sw + 10;
+    int totalKeysWidth = 0;
+    for (int i = 1; i <= 7; i++) totalKeysWidth += (i % 2 != 0) ? (int)(lw * 1.4) : lw;
+    int totalWidth = totalKeysWidth + sw; 
     int startX = (Config::PLAY_SIDE == 1) ? 50 : (Config::SCREEN_WIDTH - totalWidth - 50);
+    int dynamicCenterX = (Config::PLAY_SIDE == 1) ? (startX + totalWidth + (Config::SCREEN_WIDTH - (startX + totalWidth)) / 2) : (startX / 2);
+    
+    int renderH = 512;
+    int renderW = 512;
+    
+    SDL_Texture* targetTex = nullptr;
+    if (isVideoMode && videoTexture) targetTex = videoTexture;
+    else if (lastDisplayedId != -1 && textures.count(lastDisplayedId)) targetTex = textures[lastDisplayedId];
 
-    int dynamicCenterX;
-    if (Config::PLAY_SIDE == 1) {
-        int laneRightEdge = startX + totalWidth;
-        dynamicCenterX = laneRightEdge + (Config::SCREEN_WIDTH - laneRightEdge) / 2;
-    } else {
-        dynamicCenterX = startX / 2;
+    if (targetTex) {
+        int texW, texH;
+        SDL_QueryTexture(targetTex, NULL, NULL, &texW, &texH);
+        if (texH > 0) renderW = (int)(512.0f * ((float)texW / (float)texH));
     }
+    
+    SDL_Rect dst = { dynamicCenterX - (renderW / 2), (Config::SCREEN_HEIGHT / 2) - (renderH / 2), renderW, renderH };
 
-    // 引数xに依存せず、計算した中心座標からBGA(512x512)を配置
-    SDL_Rect dst = { dynamicCenterX - 256, y, 512, 512 };
-    // -------------------------------------------------------
-
-    bool videoActuallyDrawn = false;
-
-    // --- 【イベント更新 セクション】 (順序修正：動画描画の前に更新を行いy=0に対応) ---
+    // BGAイベント処理
     while (currentEventIndex < bgaEvents.size() && bgaEvents[currentEventIndex].y <= currentPulse) {
         lastDisplayedId = bgaEvents[currentEventIndex].id;
-        if (lastDisplayedId != -1) lastUsedPulse[lastDisplayedId] = currentPulse;
-        if (isVideoMode && videoStartMs < 0) videoStartMs = cur_ms;
         currentEventIndex++;
     }
     while (currentLayerIndex < layerEvents.size() && layerEvents[currentLayerIndex].y <= currentPulse) {
         lastLayerId = layerEvents[currentLayerIndex].id;
-        if (lastLayerId != -1) lastUsedPulse[lastLayerId] = currentPulse;
         currentLayerIndex++;
     }
     while (currentPoorIndex < poorEvents.size() && poorEvents[currentPoorIndex].y <= currentPulse) {
         lastPoorId = poorEvents[currentPoorIndex].id;
-        if (lastPoorId != -1) lastUsedPulse[lastPoorId] = currentPulse;
         currentPoorIndex++;
     }
 
-    // --- 【動画ロジック セクション】 ---
-    if (isVideoMode && !videoData.empty()) {
-        double videoElapsed = (videoStartMs >= 0) ? cur_ms - videoStartMs : 0.0;
-        int globalFrameIndex = (int)(videoElapsed * 15.0 / 1000.0);
-        int localFrameIndex = globalFrameIndex - totalFramesBeforeCurrentPart;
-
-        // パート切り替え
-        if (hasNextPartReady && localFrameIndex >= (int)videoTotalFrames) {
-            SDL_Texture* firstTex = nullptr;
-            if (!nextFrameOffsets.empty()) {
-                size_t offset = nextFrameOffsets[0];
-                uint32_t fSize;
-                memcpy(&fSize, &nextVideoData[offset], 4);
-                SDL_RWops* rw = SDL_RWFromMem(&nextVideoData[offset + 4], fSize);
-                if (rw) firstTex = IMG_LoadTexture_RW(renderer, rw, 1);
-            }
-            videoData.swap(nextVideoData);
-            frameOffsets.swap(nextFrameOffsets);
-            std::vector<uint8_t>().swap(nextVideoData);
-            std::vector<size_t>().swap(nextFrameOffsets);
-            totalFramesBeforeCurrentPart += videoTotalFrames;
-            videoTotalFrames = nextPartTotalFrames;
-            currentPartIndex++;
-            for (auto& pair : videoCache) if (pair.second) SDL_DestroyTexture(pair.second);
-            std::map<int, SDL_Texture*>().swap(videoCache);
-            if (firstTex) videoCache[0] = firstTex;
-            hasNextPartReady = false;
-            localFrameIndex = globalFrameIndex - totalFramesBeforeCurrentPart;
-        }
-
-        // 描画と先行デコード
-        int drawFrameIdx = std::max(0, std::min(localFrameIndex, (int)frameOffsets.size() - 1));
-        if (!frameOffsets.empty()) {
-            // 非同期ロード開始判断
-            if (localFrameIndex >= (int)videoTotalFrames - 150 && !isLoading && !hasNextPartReady) {
-                isLoading = true;
-                if (loaderThread.joinable()) loaderThread.join();
-                loaderThread = std::thread(&BgaManager::asyncLoadWorker, this, currentPartIndex + 1);
-            }
-            // 次フレーム予約
-            int nextIdx = drawFrameIdx + 1;
-            if (nextIdx < (int)frameOffsets.size() && videoCache.find(nextIdx) == videoCache.end()) {
-                size_t offset = frameOffsets[nextIdx];
-                uint32_t fSize;
-                memcpy(&fSize, &videoData[offset], 4);
-                SDL_RWops* rw = SDL_RWFromMem(&videoData[offset + 4], fSize);
-                if (rw) {
-                    SDL_Texture* tex = IMG_LoadTexture_RW(renderer, rw, 1);
-                    if (tex) videoCache[nextIdx] = tex;
-                }
-            }
-            // 描画
-            auto it = videoCache.find(drawFrameIdx);
-            if (it != videoCache.end()) {
-                SDL_RenderCopy(renderer, it->second, NULL, &dst);
-                videoActuallyDrawn = true;
-            }
-            // キャッシュ掃除
-            if (drawFrameIdx != lastFrameIndex) {
-                auto itDel = videoCache.begin();
-                while (itDel != videoCache.end() && itDel->first < drawFrameIdx) {
-                    if (itDel->second) SDL_DestroyTexture(itDel->second);
-                    itDel = videoCache.erase(itDel);
-                }
-                lastFrameIndex = drawFrameIdx;
-            }
-        }
-    }
-
-    // --- 【BMP動動的ロード セクション】 (優先度付き2段構え修正) ---
-    static int frameThrottle = 0;
-    int currentInterval = isVideoMode ? VIDEO_LOAD_INTERVAL : BMP_LOAD_INTERVAL;
-
-    if (++frameThrottle >= currentInterval) {
-        frameThrottle = 0;
-        int nextId = -1;
-
-        // スキャン用の共通関数
-        auto scanSpecificRange = [&](long long lookAheadMs) {
-            auto scanList = [&](const std::vector<BgaEvent>& events, size_t startIndex) {
-                for (size_t i = startIndex; i < events.size(); ++i) {
-                    if (events[i].y > currentPulse + lookAheadMs) break;
-                    if (textures.find(events[i].id) == textures.end()) {
-                        nextId = events[i].id;
-                        return true;
-                    }
-                }
-                return false;
-            };
-            if (scanList(bgaEvents, currentEventIndex)) return true;
-            if (scanList(layerEvents, currentLayerIndex)) return true;
-            if (scanList(poorEvents, currentPoorIndex)) return true;
-            return false;
-        };
-
-        // 第1優先：直近 5秒間 (5000ms) を最優先でチェック
-        bool urgentFound = scanSpecificRange(5000);
-
-        // 第2優先：緊急がなければ本来の LookAhead をチェック
-        if (!urgentFound) {
-            scanSpecificRange(isVideoMode ? VIDEO_LOOK_AHEAD : BMP_LOOK_AHEAD);
-        }
-
-        if (nextId != -1 && idToFilename.count(nextId)) {
-            loadBmp(nextId, baseDir + idToFilename[nextId], renderer);
-        }
-    }
-
-    // --- 【クリーンアップ セクション】 ---
-    static int cleanupCounter = 0;
-    if (++cleanupCounter > 180) {
-        cleanupCounter = 0;
-        long long currentKeepAlive = isVideoMode ? VIDEO_KEEP_ALIVE : BMP_KEEP_ALIVE;
-        for (auto it = textures.begin(); it != textures.end(); ) {
-            int id = it->first;
-            if (id != lastDisplayedId && id != lastLayerId && id != lastPoorId) {
-                if (std::abs(lastUsedPulse[id] - currentPulse) > currentKeepAlive) {
-                    if (it->second) SDL_DestroyTexture(it->second);
-                    lastUsedPulse.erase(id);
-                    it = textures.erase(it);
+    // --- 動画更新ロジック (Consumer) ---
+    if (isVideoMode && videoTexture) {
+        double currentTime = sharedVideoElapsed.load(std::memory_order_acquire);
+        
+        // キューから最適なフレームを探す
+        {
+            std::lock_guard<std::mutex> lock(frameMutex);
+            
+            while (!frameQueue.empty()) {
+                VideoFrame& front = frameQueue.front();
+                
+                // 次のフレームもすでに現在時刻を過ぎているなら、今の先頭は古すぎるので捨てる（ドロップフレーム）
+                if (frameQueue.size() >= 2 && frameQueue[1].pts <= currentTime) {
+                    frameQueue.pop_front();
                     continue;
                 }
+                
+                // 先頭フレームが現在時刻に到達した（あるいはわずかに過ぎた）なら採用
+                if (front.pts <= currentTime + 0.05) { // 0.05秒程度の許容誤差
+                    // データをコピーしてテクスチャ更新フラグを立てる
+                    currentY = front.yBuf;
+                    currentU = front.uBuf;
+                    currentV = front.vBuf;
+                    currentYStride = front.yStride;
+                    currentUStride = front.uStride;
+                    currentVStride = front.vStride;
+                    hasNewFrameToUpload = true;
+                    
+                    // 使い終わったフレームを捨てる
+                    frameQueue.pop_front();
+                }
+                break; 
             }
-            ++it;
         }
+
+        if (hasNewFrameToUpload) {
+            SDL_UpdateYUVTexture(videoTexture, NULL,
+                                 currentY.data(), currentYStride,
+                                 currentU.data(), currentUStride,
+                                 currentV.data(), currentVStride);
+            hasNewFrameToUpload = false;
+        }
+        SDL_RenderCopy(renderer, videoTexture, NULL, &dst);
+    } else {
+        if (lastDisplayedId != -1 && textures.count(lastDisplayedId)) SDL_RenderCopy(renderer, textures[lastDisplayedId], NULL, &dst);
     }
 
-    // --- 【最終描画 セクション】 ---
-    if (!videoActuallyDrawn && lastDisplayedId != -1 && textures.count(lastDisplayedId)) {
-        SDL_RenderCopy(renderer, textures[lastDisplayedId], NULL, &dst);
-        lastUsedPulse[lastDisplayedId] = currentPulse;
-    }
-    if (lastLayerId != -1 && textures.count(lastLayerId)) {
-        SDL_RenderCopy(renderer, textures[lastLayerId], NULL, &dst);
-        lastUsedPulse[lastLayerId] = currentPulse;
-    }
-    if (showPoor && lastPoorId != -1 && textures.count(lastPoorId)) {
-        SDL_RenderCopy(renderer, textures[lastPoorId], NULL, &dst);
-        lastUsedPulse[lastPoorId] = currentPulse;
-    }
+    if (lastLayerId != -1 && textures.count(lastLayerId)) SDL_RenderCopy(renderer, textures[lastLayerId], NULL, &dst);
+    if (showPoor && lastPoorId != -1 && textures.count(lastPoorId)) SDL_RenderCopy(renderer, textures[lastPoorId], NULL, &dst);
 }
 
 void BgaManager::clear() {
-    if (loaderThread.joinable()) loaderThread.join();
-    isLoading = false;
-    hasNextPartReady = false;
-
+    quitThread = true;
+    if (decodeThread.joinable()) decodeThread.join();
     for (auto& pair : textures) if (pair.second) SDL_DestroyTexture(pair.second);
-    std::unordered_map<int, SDL_Texture*>().swap(textures);
-
-    for (auto& pair : videoCache) if (pair.second) SDL_DestroyTexture(pair.second);
-    std::map<int, SDL_Texture*>().swap(videoCache);
-    
+    textures.clear();
     if (videoTexture) { SDL_DestroyTexture(videoTexture); videoTexture = nullptr; }
+    if (pFrame) { av_frame_free(&pFrame); pFrame = nullptr; }
+    if (pCodecCtx) { avcodec_free_context(&pCodecCtx); pCodecCtx = nullptr; }
+    if (pFormatCtx) { avformat_close_input(&pFormatCtx); pFormatCtx = nullptr; }
     
-    std::vector<uint8_t>().swap(videoData);
-    std::vector<uint8_t>().swap(nextVideoData);
-    std::vector<size_t>().swap(frameOffsets);
-    std::vector<size_t>().swap(nextFrameOffsets);
-    
-    bgaEvents.clear(); layerEvents.clear(); poorEvents.clear();
+    isVideoMode = false;
+    hasNewFrameToUpload = false;
+    frameQueue.clear();
     currentEventIndex = 0; currentLayerIndex = 0; currentPoorIndex = 0;
     lastDisplayedId = -1; lastLayerId = -1; lastPoorId = -1;
-    showPoor = false; isVideoMode = false;
-    videoStartMs = -1.0; currentPartIndex = 1; baseVideoPath = "";
-    totalFramesBeforeCurrentPart = 0;
 }
 
 void BgaManager::cleanup() { clear(); }

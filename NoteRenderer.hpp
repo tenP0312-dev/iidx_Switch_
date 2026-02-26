@@ -17,9 +17,13 @@ public:
     void init(SDL_Renderer* ren); 
     void cleanup();
 
+    // テキストキャッシュをクリアする（メモリ解放用）
+    void clearTextCache();
+
     void drawText(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter = false, bool isRight = false, const std::string& fontPath = "");
     void drawTextCached(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter = false, bool isRight = false, const std::string& fontPath = "");
     void drawImage(SDL_Renderer* ren, const std::string& path, int x, int y, int w, int h, int alpha = 255);
+    void renderBackground(SDL_Renderer* ren);
     void renderLanes(SDL_Renderer* ren, double progress);
     void renderNote(SDL_Renderer* ren, const PlayableNote& note, double cur_ms, double speed, bool isAuto = false);
     void renderBeatLine(SDL_Renderer* ren, double diff, double speed);
@@ -43,6 +47,10 @@ private:
     std::map<std::string, TTF_Font*> customFontCache;
     std::map<std::string, SDL_Texture*> textTextureCache;
 
+    SDL_Texture* lane_Flame = nullptr;
+    SDL_Texture* lane_Flame2 = nullptr;
+
+    SDL_Texture* texBackground = nullptr;
     SDL_Texture* texNoteWhite = nullptr;
     SDL_Texture* texNoteBlue  = nullptr;
     SDL_Texture* texNoteRed   = nullptr;
@@ -72,9 +80,16 @@ private:
     SDL_Texture* texNumberAtlas = nullptr;
 
     std::vector<SDL_Texture*> texBombs; 
-
-    // --- Minimal Invasive Change: レーンカバー画像用のポインタを追加 ---
     SDL_Texture* texLaneCover = nullptr; 
+    SDL_Texture* texGaugeAssist = nullptr;
+    SDL_Texture* texGaugeNormal = nullptr;
+    SDL_Texture* texGaugeHard   = nullptr;
+    SDL_Texture* texGaugeExHard = nullptr;
+    SDL_Texture* texGaugeHazard = nullptr;
+    SDL_Texture* texGaugeDan    = nullptr;
+    SDL_Texture* texKeys = nullptr;
+    SDL_Texture* tex_scratch = nullptr;
+    
 };
 
-#endif // NOTERENDERER_HPP
+#endif

@@ -10,7 +10,7 @@
 
 enum class OptionState {
     SELECTING_ITEM,  // どの設定を変えるか選択中
-    ADJUSTING_VALUE, // 【追加】数値変更専用モード
+    ADJUSTING_VALUE, // 数値変更専用モード
     WAITING_KEY,     // キーコンフィグの入力待ち
     FINISHED         // オプション終了
 };
@@ -18,6 +18,9 @@ enum class OptionState {
 struct OptionMenuItem {
     std::string label;
     std::string current_value;
+
+    // エラー回避のためコンストラクタを明示的に定義
+    OptionMenuItem(std::string l, std::string v) : label(l), current_value(v) {}
 };
 
 class SceneOption {
@@ -30,7 +33,7 @@ private:
     int cursor = 0;
     int configStep = 0; 
     uint32_t lastConfigTime = 0; 
-    uint32_t repeatTimer = 0; // 【追加】長押し判定用タイマー（コンパイルエラー解消用）
+    uint32_t repeatTimer = 0;
     std::vector<OptionMenuItem> items;
 
     void updateItemList();

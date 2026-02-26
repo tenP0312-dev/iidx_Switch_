@@ -74,9 +74,10 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     SDL_RenderPresent(ren);
     SDL_Delay(200); 
 
-    IMG_Quit();
-    int imgFlags = IMG_INIT_PNG | IMG_INIT_JPG;
-    IMG_Init(imgFlags);
+    // 【削除】無意味な初期化処理を削除
+    // IMG_Quit();
+    // int imgFlags = IMG_INIT_PNG | IMG_INIT_JPG;
+    // IMG_Init(imgFlags);
     SDL_Delay(50);
 
     int lastParsePercent = -1;
@@ -104,8 +105,11 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     bga.setLayerEvents(data.layer_events); 
     bga.setPoorEvents(data.poor_events);   
 
+    // --- 【修正】メモリアロケーションによるプチフリーズを防止 ---
     effects.clear();
+    effects.reserve(64); // 余裕を持って確保
     bombAnims.clear(); 
+    bombAnims.reserve(64); 
     for(int i=0; i<9; ++i) lanePressed[i] = false;
 
     isAssistUsed = (Config::ASSIST_OPTION > 0);
@@ -127,7 +131,9 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     bga.setBgaDirectory(bmsonDir);
 
     if (!data.header.bga_video.empty()) {
-        bga.loadBgaFile(bmsonDir + data.header.bga_video, ren);
+        std::string videoFile = data.header.bga_video;
+        std::string fullVideoPath = bmsonDir + videoFile;
+        bga.loadBgaFile(fullVideoPath, ren);
     }
 
     for (auto const& [id, filename] : data.bga_images) {
@@ -148,11 +154,18 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     SDL_RenderPresent(ren);
     snd.preloadBoxIndex(bmsonDir, bmsonBaseName);
 
-    int lastPercent = -1;
-    for (int i = 0; i < (int)data.sound_channels.size(); ++i) {
-        int curPercent = (i * 100) / (int)data.sound_channels.size();
+    std::vector<std::string> soundList;
+    for (const auto& ch : data.sound_channels) {
+        soundList.push_back(ch.name);
+    }
+
+    snd.loadSoundsInBulk(soundList, bmsonDir, bmsonBaseName, [&](int processedCount, const std::string& currentName) {
+        int curPercent = (processedCount * 100) / (int)data.sound_channels.size();
+        static int lastPercent = -1;
+
         if (curPercent != lastPercent) {
-            renderer.renderLoading(ren, i + 1, data.sound_channels.size(), "Audio Loading: " + data.sound_channels[i].name);
+            renderer.renderLoading(ren, processedCount, data.sound_channels.size(), "Audio Loading: " + currentName);
+            
             uint64_t curMem = snd.getCurrentMemory();
             uint64_t maxMem = snd.getMaxMemory();
             double curMB = (double)curMem / (1024.0 * 1024.0);
@@ -160,20 +173,43 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
             char memBuf[128];
             snprintf(memBuf, sizeof(memBuf), "WAV Memory: %.1f / %.1f MB", curMB, maxMB);
             renderer.drawText(ren, memBuf, 640, 580, {200, 200, 200, 255}, false, true);
+            
             if (curMem >= maxMem - (1024 * 10)) { 
                 renderer.drawText(ren, "WARNING: MEMORY LIMIT REACHED (SKIPPING)", 640, 620, {255, 50, 50, 255}, false, true);
             }
+            
             SDL_RenderPresent(ren);
             lastPercent = curPercent;
         }
-        snd.loadSingleSound(data.sound_channels[i].name, bmsonDir, bmsonBaseName);
-        if (i % 100 == 0) {
+
+        if (processedCount % 100 == 0) {
             SDL_Event e; while(SDL_PollEvent(&e));
-            SDL_Delay(5);
+            SDL_Delay(2);
         }
-    }
+    });
 
     SDL_Delay(100);
+
+    double videoOffsetMs = 0.0;
+    if (data.header.bga_offset != 0) {
+        double currentBpm = data.header.bpm;
+        int64_t currentY = 0;
+        double currentMs = 0.0;
+        std::vector<BPMEvent> sortedBpm = data.bpm_events;
+        std::sort(sortedBpm.begin(), sortedBpm.end(), [](const BPMEvent& a, const BPMEvent& b){ return a.y < b.y; });
+        for (const auto& bpmEv : sortedBpm) {
+            if (bpmEv.y >= data.header.bga_offset) break;
+            int64_t distY = bpmEv.y - currentY;
+            currentMs += (double)distY * 60000.0 / (currentBpm * data.header.resolution);
+            currentY = bpmEv.y;
+            currentBpm = bpmEv.bpm;
+        }
+        if (currentY < data.header.bga_offset) {
+            int64_t distY = data.header.bga_offset - currentY;
+            currentMs += (double)distY * 60000.0 / (currentBpm * data.header.resolution);
+        }
+        videoOffsetMs = currentMs;
+    }
 
     double max_target_ms = 0;
     for (const auto& n : engine.getNotes()) {
@@ -254,6 +290,9 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     while (playing) {
         uint32_t now = SDL_GetTicks();
         double cur_ms = (double)((int64_t)now - (int64_t)start_ticks);
+
+        bga.syncTime(cur_ms - videoOffsetMs);
+
         if (!processInput(cur_ms, now, snd, engine)) {
             if (engine.getStatus().isFailed) playing = false;
             else { isAborted = true; playing = false; break; }
@@ -271,14 +310,10 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
 
         renderScene(ren, renderer, engine, bga, cur_ms, cur_y, fps, currentHeader, now, progress);
 
-        // --- フルコンボ判定と演出 ---
         if (!fcEffectTriggered && status.remainingNotes <= 0) {
-            // 修正：判定条件を「ミスなし かつ 1枚以上のノーツを完走」に変更
             bool isFC = (status.poorCount == 0 && status.badCount == 0 && status.totalNotes > 0);
             if (isFC) {
-                // 重要：status.clearTypeをFULL_COMBOに更新し、ScoreManagerが上位記録として認識できるようにする
                 status.clearType = ClearType::FULL_COMBO;
-
                 fcEffectTriggered = true; 
                 uint32_t fcStart = SDL_GetTicks();
                 while (SDL_GetTicks() - fcStart < 2500) {
@@ -424,11 +459,13 @@ bool ScenePlay::processInput(double cur_ms, uint32_t now, SoundManager& snd, Pla
 void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngine& engine, BgaManager& bga, double cur_ms, int64_t cur_y, int fps, const BMSHeader& header, uint32_t now, double progress) {
     SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
     SDL_RenderClear(ren);
+    renderer.renderBackground(ren);
     int bgaX = (Config::PLAY_SIDE == 1) ? 600 : 40; 
     int bgaY = 40; 
+    double currentBpm = engine.getBpmFromMs(cur_ms);
+    renderer.renderUI(ren, header, fps, currentBpm, engine.getStatus().exScore);
     bga.render(cur_y, ren, bgaX, bgaY, cur_ms);
     renderer.renderLanes(ren, progress);
-    double currentBpm = engine.getBpmFromMs(cur_ms);
     double visual_speed = (Config::HIGH_SPEED * currentBpm) / 475.0; 
     double max_visible_ms = (double)Config::VISIBLE_PX / std::max(0.01, visual_speed) + 200.0;
 
@@ -438,28 +475,27 @@ void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngin
         if (y_diff_ms > -500.0 && y_diff_ms < max_visible_ms) renderer.renderBeatLine(ren, y_diff_ms, visual_speed);
     }
 
-    // --- エフェクト描画 ---
-    for (auto it = effects.begin(); it != effects.end(); ) {
-        if (it->lane >= 1 && it->lane <= 7 && lanePressed[it->lane]) {
-            it->startTime = now; 
+    // エフェクト描画（最適化版）
+    effects.erase(std::remove_if(effects.begin(), effects.end(), [&](auto& eff) {
+        if (eff.lane >= 1 && eff.lane <= 7 && lanePressed[eff.lane]) {
+            eff.startTime = now; 
         }
-        float duration = (it->lane == 8) ? 200.0f : 100.0f;
-        float p = (float)(now - it->startTime) / duration; 
-        if (p >= 1.0f) it = effects.erase(it);
-        else { renderer.renderHitEffect(ren, it->lane, p); ++it; }
-    }
+        float duration = (eff.lane == 8) ? 200.0f : 100.0f;
+        float p = (float)(now - eff.startTime) / duration; 
+        if (p >= 1.0f) return true;
+        renderer.renderHitEffect(ren, eff.lane, p);
+        return false;
+    }), effects.end());
 
-    // --- ボム描画 ---
-    for (auto it = bombAnims.begin(); it != bombAnims.end(); ) {
-        float p = (float)(now - it->startTime) / 300.0f;
-        if (p >= 1.0f) it = bombAnims.erase(it);
-        else {
-            if (it->judgeType == 1 || it->judgeType == 2) {
-                renderer.renderBomb(ren, it->lane, (int)(p * 10));
-            }
-            ++it;
+    // ボム描画（最適化版）
+    bombAnims.erase(std::remove_if(bombAnims.begin(), bombAnims.end(), [&](auto& ba) {
+        float p = (float)(now - ba.startTime) / 300.0f;
+        if (p >= 1.0f) return true;
+        if (ba.judgeType == 1 || ba.judgeType == 2) {
+            renderer.renderBomb(ren, ba.lane, (int)(p * 10));
         }
-    }
+        return false;
+    }), bombAnims.end());
 
     for (const auto& n : engine.getNotes()) {
         if ((!n.played || n.isBeingPressed) && !n.isBGM) {
@@ -485,30 +521,22 @@ void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngin
         if (p_raw >= 1.0f) judge.active = false;
         else {
             SDL_Color drawColor = judge.color; 
-            std::string drawText = judge.text; // 元の "P-GREAT" を維持
+            std::string drawText = judge.text;
             bool shouldDraw = true; 
             uint32_t frameUnit = now / 32;
 
-            if (judge.text == "P-GREAT") {
-                // P-GREATの時は点滅させず、Renderer側のアニメーションに任せる
-                // drawText = "GREAT";  <-- これを削除またはコメントアウト
-            } else { 
-                // GREAT以下の場合は点滅（1フレームおきに非表示）
+            if (judge.text != "P-GREAT") {
                 if (frameUnit % 2 == 0) shouldDraw = false; 
             }
             if (shouldDraw) {
                 renderer.renderJudgment(ren, drawText, 0.0f, drawColor, engine.getStatus().combo);
-                if (Config::SHOW_FAST_SLOW && judge.text != "P-GREAT" && judge.text != "POOR" && judge.text != "MISS") {
-                    if (judge.isFast) renderer.drawText(ren, "FAST", laneCenterX, 365, {0, 255, 255, 255}, false, true);
-                    else if (judge.isSlow) renderer.drawText(ren, "SLOW", laneCenterX, 365, {255, 0, 255, 255}, false, true);
-                }
+                // --- FAST/SLOW 表示ロジックを完全に削除 ---
             }
         }
     }
 
     renderer.renderCombo(ren, engine.getStatus().combo);
     renderer.renderGauge(ren, engine.getStatus().gauge, Config::GAUGE_OPTION, engine.getStatus().isFailed);
-    renderer.renderUI(ren, header, fps, currentBpm, engine.getStatus().exScore);
 
     if (startButtonPressed) {
         double hs = std::max(0.01, Config::HIGH_SPEED);

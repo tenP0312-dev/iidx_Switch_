@@ -6,12 +6,8 @@
 #include <random>
 #include <map>
 #include <set>
-#include "ChartProjector.hpp"
-#include "JudgeManager.hpp"
 
-/**
- * TOTAL値の計算 (CS HAPPY SKY 解析仕様)
- */
+// TOTAL値計算 (HappySky仕様)
 int calculateHSRecoveryInternal(int notes) {
     if (notes <= 0) return 0;
     if (notes < 350) {
@@ -21,26 +17,21 @@ int calculateHSRecoveryInternal(int notes) {
     }
 }
 
-double calculateDefaultTotal(int notes) {
-    if (notes <= 0) return 160.0;
-    int recovery = calculateHSRecoveryInternal(notes);
-    return (double)recovery / 50.0 * notes;
-}
-
 void PlayEngine::init(const BMSData& data) {
     bmsData = data;
-    // Projectorの初期化
     projector.init(bmsData);
     
     status = PlayStatus(); 
     notes.clear();
+    // メモリ再確保を防ぐため予約
+    notes.reserve(data.header.totalNotes + 100);
     beatLines.clear();
     currentJudge = JudgmentDisplay();
 
     status.totalNotes = 0;
     status.maxTargetMs = 0;
 
-    // --- STYLE オプションの処理準備 (100%継承) ---
+    // --- ランダムオプション等の適用 ---
     int laneMap[9];
     for (int i = 0; i <= 8; i++) laneMap[i] = i;
 
@@ -68,6 +59,7 @@ void PlayEngine::init(const BMSData& data) {
         bool isBGM;
     };
     std::vector<TempNote> tempNotes;
+    tempNotes.reserve(data.header.totalNotes * 2);
 
     for (const auto& ch : bmsData.sound_channels) {
         for (const auto& n : ch.notes) {
@@ -90,21 +82,15 @@ void PlayEngine::init(const BMSData& data) {
         pn.channel_name = tn.channel_name;
         pn.isBGM = tn.isBGM;
 
-        // --- LEGACY NOTES 適用条件の判定 ---
-        // 2: LEGACY, 4: AS+LEGACY, 6: FULL ASSIST
-        bool isLegacyModel = (Config::ASSIST_OPTION == 2 || 
-                              Config::ASSIST_OPTION == 4 || 
-                              Config::ASSIST_OPTION == 6);
+        bool isLegacyModel = (Config::ASSIST_OPTION == 2 || Config::ASSIST_OPTION == 4 || Config::ASSIST_OPTION == 6);
 
         pn.l = tn.l;
         if (pn.l > 0) {
             if (isLegacyModel) {
-                // レガシー適用時：LNを単発ノーツ化
                 pn.l = 0;
                 pn.isLN = false;
                 pn.duration_ms = 0;
             } else {
-                // 通常時
                 pn.isLN = true;
                 double end_ms = projector.getMsFromY(tn.y + tn.l);
                 pn.duration_ms = end_ms - pn.target_ms;
@@ -154,17 +140,9 @@ void PlayEngine::init(const BMSData& data) {
 
     baseRecoveryPerNote = (double)calculateHSRecoveryInternal(status.totalNotes);
 
-    // --- GAUGE 初期値設定の修正 ---
-    if (Config::GAUGE_OPTION == 5) { 
-        // 段位認定時は Config から取得
-        status.gauge = (double)Config::DAN_GAUGE_START_PERCENT;
-    } else if (Config::GAUGE_OPTION >= 3) {
-        // HARD / EX-HARD / HAZARD など
-        status.gauge = 100.0;
-    } else {
-        // NORMAL / EASY / ASSIST など
-        status.gauge = 22.0; 
-    }
+    if (Config::GAUGE_OPTION == 5) status.gauge = (double)Config::DAN_GAUGE_START_PERCENT;
+    else if (Config::GAUGE_OPTION >= 3) status.gauge = 100.0;
+    else status.gauge = 22.0; 
 
     status.isFailed = false;
     status.isDead = false;
@@ -173,20 +151,20 @@ void PlayEngine::init(const BMSData& data) {
     nextUpdateIndex = 0;
     for (int i = 0; i <= 8; i++) lastSoundPerLane[i] = "";
 
-    // グラフ用データ初期化
     status.gaugeHistory.clear();
+    status.gaugeHistory.reserve(1000); // グラフ用メモリ予約
     lastHistoryUpdateMs = -1000.0; 
 }
 
 void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
     if (status.isFailed) return;
 
-    // --- ゲージ推移グラフの記録 (200ms間隔) ---
     if (cur_ms >= 0 && cur_ms - lastHistoryUpdateMs >= 200.0) {
         status.gaugeHistory.push_back((float)status.gauge);
         lastHistoryUpdateMs = cur_ms;
     }
 
+    // nextUpdateIndex を使うことで、通過済みノーツのループをスキップ
     for (size_t i = nextUpdateIndex; i < notes.size(); ++i) {
         auto& n = notes[i];
         
@@ -195,7 +173,6 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
             continue;
         }
 
-        // BGMや事前読み込みはオフセットに関係なく曲の絶対時間で処理
         if (n.target_ms > cur_ms + 500.0) break;
 
         if (!n.isBGM) {
@@ -207,14 +184,13 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
             n.played = true;
         } 
         else if (!n.isBGM) {
-            // デッドライン判定（オフセット適用）
             double adjusted_target = n.target_ms + Config::JUDGE_OFFSET;
             double end_ms = adjusted_target + (n.isLN ? n.duration_ms : 0);
             
-            // 終端時間を過ぎても判定が確定していない（離し忘れ or 見逃し）
+            // 見逃しPOOR判定
             if (cur_ms > end_ms + Config::JUDGE_POOR) {
                 n.played = true;
-                n.isBeingPressed = false; // 強制解除
+                n.isBeingPressed = false;
                 status.remainingNotes--;
                 status.poorCount++;
                 status.combo = 0; 
@@ -230,6 +206,7 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
         }
     }
 
+    // クリア判定
     if (cur_ms > status.maxTargetMs + 1000.0) {
         if (!status.isFailed) {
             int opt = Config::GAUGE_OPTION;
@@ -267,9 +244,8 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
         if (n.played || n.isBGM || n.lane != lane) continue;
         if (n.isLN && n.isBeingPressed) continue; 
 
-        // 判定中心にオフセットを適用
         double adjusted_target = n.target_ms + Config::JUDGE_OFFSET;
-        double raw_diff = cur_ms - adjusted_target; // FASTなら負, SLOWなら正
+        double raw_diff = cur_ms - adjusted_target;
         double diff = std::abs(raw_diff);
 
         if (diff > Config::JUDGE_BAD) {
@@ -282,7 +258,6 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
         
         if (n.isLN) {
             n.isBeingPressed = true;
-            // CN仕様：始点での played 確定はせず、remainingNotes も減らさない（終端で減らす）
         } else {
             n.played = true;
             status.remainingNotes--;
@@ -297,7 +272,7 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
         if (diff <= Config::JUDGE_PGREAT) {
             status.pGreatCount++; status.combo++; judgeType = 3;
             status.exScore += 2; 
-            isFast = false; isSlow = false; // PGREAT時はFAST/SLOW表示しない
+            isFast = false; isSlow = false;
         } else if (diff <= Config::JUDGE_GREAT) {
             status.greatCount++; status.combo++; judgeType = 2;
             status.exScore += 1; 
@@ -311,10 +286,10 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
             judgeType = 0;
             if (n.isLN) {
                 n.isBeingPressed = false;
-                n.played = true; // 始点でBADならその時点でノーツ終了
+                n.played = true;
                 status.remainingNotes--;
             }
-            isFast = false; isSlow = false; // BAD以下は表示しない
+            isFast = false; isSlow = false;
         }
 
         finalJudge = judgeType;
@@ -331,7 +306,7 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
     if (!hitSuccess) {
         if (lane >= 1 && lane <= 8 && !lastSoundPerLane[lane].empty()) {
             snd.playByName(lastSoundPerLane[lane]);
-            if (Config::GAUGE_OPTION == 6) {
+            if (Config::GAUGE_OPTION == 6) { // HAZARD
                 status.gauge = 0.0;
                 status.isFailed = true;
                 status.isDead = true;
@@ -348,14 +323,11 @@ void PlayEngine::processRelease(int lane, double cur_ms, uint32_t now) {
 
     for (auto& n : notes) {
         if (!n.played && n.isLN && n.lane == lane && n.isBeingPressed) {
-            // 終端位置にもオフセットを適用
             double adjusted_end = (n.target_ms + n.duration_ms) + Config::JUDGE_OFFSET;
             double raw_diff = cur_ms - adjusted_end;
             double diff = std::abs(raw_diff);
             
-            // 離し判定：終端付近で離したか
             if (diff <= Config::JUDGE_BAD) {
-                // 正しく終端で離した
                 n.isBeingPressed = false;
                 n.played = true;
                 status.remainingNotes--;
@@ -386,7 +358,6 @@ void PlayEngine::processRelease(int lane, double cur_ms, uint32_t now) {
                 if (status.combo > status.maxCombo) status.maxCombo = status.combo;
                 judgeManager.updateGauge(status, judgeType, true, baseRecoveryPerNote);
             } else {
-                // 早すぎた離し（または遅すぎ）
                 n.isBeingPressed = false;
                 n.played = true; 
                 status.remainingNotes--;

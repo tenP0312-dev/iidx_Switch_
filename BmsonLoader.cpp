@@ -18,12 +18,15 @@ double get_double_safe(const nlohmann::json& j, const std::string& key, double d
     return default_val;
 }
 
-// 【修正】画像仕様に基づき、プレイヤー1の範囲(1-8)を判定
+// 画像仕様に基づき、プレイヤー1の範囲(1-8)を判定
 bool isPlayableLaneSP(int64_t x) {
     return (x >= 1 && x <= 8);
 }
 
-// コールバック引数を追加
+/**
+ * 譜面データのロード
+ * 修正点: SoundManagerでの個別ロードを廃止し、上位層（ScenePlay等）での一括ロードを促す設計に変更
+ */
 BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> onProgress) {
     BMSData data;
     std::ifstream f(path);
@@ -33,7 +36,7 @@ BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> on
         f >> j;
         const nlohmann::json& info = (j.contains("info") && !j["info"].is_null()) ? j["info"] : j;
         
-        // --- 【追加】bmsonファイル名(拡張子なし)の抽出 ---
+        // bmsonファイル名(拡張子なし)の抽出
         std::string bmsonName = path;
         size_t lastSlash = bmsonName.find_last_of("/\\");
         if (lastSlash != std::string::npos) bmsonName = bmsonName.substr(lastSlash + 1);
@@ -118,8 +121,8 @@ BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> on
                 BMSSoundChannel channel;
                 channel.name = get_string_safe(ch, "name", "");
                 
-                // --- 【追加】SoundManagerによる音源ロード (bmsonNameを渡す) ---
-                SoundManager::getInstance().loadSingleSound(channel.name, rootDir, bmsonName);
+                // --- 【重要】ここでの loadSingleSound 呼び出しを削除 ---
+                // ファイルオープン競争を避け、ScenePlay側で loadSoundsInBulk を呼び出すように誘導します。
 
                 if (ch.contains("notes") && ch["notes"].is_array()) {
                     for (auto& n : ch["notes"]) {
@@ -140,18 +143,18 @@ BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> on
                 }
                 data.sound_channels.push_back(channel);
 
-                // 【追加】進捗コールバックの実行 (0.0 - 1.0)
                 if (onProgress) {
                     onProgress((float)(i + 1) / (float)totalCh);
                 }
             }
         }
-        // 【修正箇所】header.totalNotesに値を入れ、カスタムフォルダ/UI表示で使われる.totalにも代入
         data.header.totalNotes = totalNotesCount;
         data.header.total = (double)totalNotesCount; 
         data.header.is7Key = (hasP1_6or7 && !hasP2Side);
 
         // --- BGAデータの階層構造に対応 ---
+        int videoId = -1; // 動画のIDを追跡するための変数
+
         if (j.contains("bga") && j["bga"].is_object()) {
             const auto& bga_node = j["bga"];
 
@@ -161,16 +164,19 @@ BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> on
                     int id = img.value("id", 0);
                     std::string name = get_string_safe(img, "name", "");
                     if (!name.empty()) {
-                        // --- 【追加・分離ロジック】動画拡張子の判定 ---
                         std::string low = name;
                         std::transform(low.begin(), low.end(), low.begin(), ::tolower);
                         if (low.find(".wmv") != std::string::npos || 
                             low.find(".mp4") != std::string::npos || 
+                            low.find(".mpg") != std::string::npos || 
+                            low.find(".mpeg") != std::string::npos || 
+                            low.find(".avi") != std::string::npos ||
+                            low.find(".mov") != std::string::npos ||
                             low.find(".bga") != std::string::npos) {
                             
-                            // 動画として認識。拡張子を .bga に統一して header へ保存
-                            size_t dot = name.find_last_of(".");
-                            data.header.bga_video = name.substr(0, dot) + ".bga";
+                            // 動画として認識
+                            data.header.bga_video = name;
+                            videoId = id; // 動画IDを記録
                         } else {
                             // 画像として認識
                             data.bga_images[id] = name;
@@ -182,12 +188,19 @@ BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> on
             // 背景イベント (bga_events)
             if (bga_node.contains("bga_events") && bga_node["bga_events"].is_array()) {
                 for (auto& e : bga_node["bga_events"]) {
-                    data.bga_events.push_back({e.value("y", (int64_t)0), e.value("id", 0)});
+                    int64_t y = e.value("y", (int64_t)0);
+                    int id = e.value("id", 0);
+                    data.bga_events.push_back({y, id});
+                    
+                    // 動画IDと一致するイベントが見つかった場合、そのタイミングを保存
+                    if (id == videoId && videoId != -1) {
+                        data.header.bga_offset = y; // 再生開始タイミング(pulse)を設定
+                    }
                 }
                 std::sort(data.bga_events.begin(), data.bga_events.end(), [](auto& a, auto& b){ return a.y < b.y; });
             }
 
-            // 前面レイヤー (layer_events) 【追加】
+            // 前面レイヤー (layer_events)
             if (bga_node.contains("layer_events") && bga_node["layer_events"].is_array()) {
                 for (auto& e : bga_node["layer_events"]) {
                     data.layer_events.push_back({e.value("y", (int64_t)0), e.value("id", 0)});
@@ -195,7 +208,7 @@ BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> on
                 std::sort(data.layer_events.begin(), data.layer_events.end(), [](auto& a, auto& b){ return a.y < b.y; });
             }
 
-            // ミス画像 (poor_events) 【追加】
+            // ミス画像 (poor_events)
             if (bga_node.contains("poor_events") && bga_node["poor_events"].is_array()) {
                 for (auto& e : bga_node["poor_events"]) {
                     data.poor_events.push_back({e.value("y", (int64_t)0), e.value("id", 0)});
@@ -297,28 +310,43 @@ BMSHeader BmsonLoader::loadHeader(const std::string& path) {
                 }
             }
         }
-        // 【修正箇所】header.totalNotesに値を入れ、カスタムフォルダ/UI表示で使われる.totalにも代入
         h.totalNotes = totalNotesCount;
         h.total = (double)totalNotesCount; 
         h.is7Key = (hasP1_6or7 && !hasP2Side);
 
-        // --- 【追加・分離ロジック：Headerのみロード時も動画パスを抽出】 ---
+        // --- 動画パスと開始タイミング(offset)を取得 ---
+        int videoId = -1;
         if (j.contains("bga") && j["bga"].is_object()) {
             const auto& bga_node = j["bga"];
             if (bga_node.contains("bga_header") && bga_node["bga_header"].is_array()) {
                 for (auto& img : bga_node["bga_header"]) {
                     std::string name = get_string_safe(img, "name", "");
+                    int id = img.value("id", 0);
+
                     std::string low = name;
                     std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-                        if (low.find(".wmv") != std::string::npos || 
-                            low.find(".mp4") != std::string::npos || 
-                            low.find(".mpg") != std::string::npos || 
-                            low.find(".mpeg") != std::string::npos || 
-                            low.find(".avi") != std::string::npos ||
+                    if (low.find(".wmv") != std::string::npos || 
+                        low.find(".mp4") != std::string::npos || 
+                        low.find(".mpg") != std::string::npos || 
+                        low.find(".mpeg") != std::string::npos || 
+                        low.find(".avi") != std::string::npos ||
+                        low.find(".mov") != std::string::npos ||
                         low.find(".bga") != std::string::npos) {
-                        size_t dot = name.find_last_of(".");
-                        h.bga_video = name.substr(0, dot) + ".bga";
-                        break; // 最初に見つかった動画を採用
+                        
+                        h.bga_video = name;
+                        videoId = id; // 動画IDを保持
+                        break; 
+                    }
+                }
+            }
+            
+            // loadHeaderでも動画タイミング(offset)だけは取得する
+            if (videoId != -1 && bga_node.contains("bga_events") && bga_node["bga_events"].is_array()) {
+                for (auto& e : bga_node["bga_events"]) {
+                    int id = e.value("id", 0);
+                    if (id == videoId) {
+                        h.bga_offset = e.value("y", (int64_t)0);
+                        break; 
                     }
                 }
             }
