@@ -158,9 +158,8 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     }
 }
 
-void SoundManager::play(int channel_id) { 
-    // Not used in current implementation
-}
+// --- play 関数の重複を削除 ---
+// 以前の void SoundManager::play(int channel_id) { ... } は完全に消去してください。
 
 void SoundManager::play(int soundId) { 
     uint32_t id = static_cast<uint32_t>(soundId);
@@ -223,12 +222,12 @@ void SoundManager::clear() {
     for (auto& pair : sounds) {
         if (pair.second) Mix_FreeChunk(pair.second);
     }
-    std::unordered_map<std::string, Mix_Chunk*>().swap(sounds);
-    std::unordered_map<std::string, int>().swap(activeChannels);
+    // ★エラー修正：キーの型を uint32_t に合わせる
+    std::unordered_map<uint32_t, Mix_Chunk*>().swap(sounds);
+    std::unordered_map<uint32_t, int>().swap(activeChannels);
+    
     boxIndex.clear();
     currentTotalMemory = 0;
-    
-    // 【重要】Mix_CloseAudio() は削除しました（クラッシュ対策）
 }
 
 void SoundManager::cleanup() {

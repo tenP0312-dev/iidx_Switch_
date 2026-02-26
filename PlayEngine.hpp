@@ -26,6 +26,7 @@ public:
     const std::vector<PlayableNote>& getNotes() const { return notes; }
     const std::vector<PlayableLine>& getBeatLines() const { return beatLines; }
     JudgmentDisplay& getCurrentJudge() { return currentJudge; }
+    uint32_t lastSoundPerLaneId[9];
 
 private:
     BMSData bmsData;
@@ -39,8 +40,9 @@ private:
 
     double baseRecoveryPerNote = 0.0;
     size_t nextUpdateIndex = 0;
-    std::string lastSoundPerLane[9];
+    
     double lastHistoryUpdateMs = -1000.0;
+
 };
 
 #endif

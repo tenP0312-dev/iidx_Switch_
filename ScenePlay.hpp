@@ -13,7 +13,7 @@
 struct BombAnim {
     int lane;
     uint32_t startTime;
-    int judgeType; // 【追加】0:なし, 1:P-GREAT, 2:GREAT, 3:その他
+    int judgeType; // 0:なし, 1:P-GREAT, 2:GREAT, 3:その他
 };
 
 // 前方宣言
@@ -27,16 +27,19 @@ public:
     const BMSHeader& getHeader() const { return currentHeader; }
 
 private:
+    // --- 内部処理用関数（重複を削除し、ここに集約） ---
     bool processInput(double cur_ms, uint32_t now, SoundManager& snd, PlayEngine& engine);
-    bool isAutoLane(int lane);
     void updateAssist(double cur_ms, PlayEngine& engine, SoundManager& snd);
-    int getLaneFromJoystickButton(int btn);
-    
     void renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngine& engine, 
                      BgaManager& bga, 
                      double cur_ms, int64_t cur_y, int fps, const BMSHeader& header, 
                      uint32_t now, double progress);
 
+    // --- 補助関数 ---
+    bool isAutoLane(int lane);
+    int getLaneFromJoystickButton(int btn);
+
+    // --- メンバ変数 ---
     std::vector<ActiveEffect> effects;  
     std::vector<BombAnim> bombAnims; 
     PlayStatus status;          
@@ -53,6 +56,9 @@ private:
 
     uint32_t lastStartPressTime = 0;
     int backupSudden = 300; 
+    
+    // 最適化用インデックス
+    size_t drawStartIndex = 0; 
 };
 
 #endif
