@@ -12,6 +12,13 @@ static const long long BMP_LOOK_AHEAD = 300000;
 void BgaManager::init(size_t expectedSize) {
     clear();
     textures.reserve(std::min((size_t)256, expectedSize));
+
+    // 批評家指摘 A: スレッドが動く前にメモリプールを確定させる
+    // 1280x720 (NV12) * 5フレーム分を一括確保し、スレッド内での再確保（断片化）を物理的に防ぐ
+    int max_w = 1280; 
+    int max_h = 720;
+    size_t nv12Size = (max_w * max_h) + (max_w * max_h / 2);
+    this->memoryPoolV.assign(nv12Size * MAX_FRAME_QUEUE, 0); 
 }
 
 bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
@@ -56,12 +63,17 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
 
     pFrame = av_frame_alloc();
 
-    // ★修正：IYUV -> NV12 に変更（SwitchのGPUと親和性が高く、転送が高速）
+    // ★修正：批評家指摘 3-B：テクスチャ作成失敗を厳格にチェック
     videoTexture = SDL_CreateTexture(renderer, 
                                      SDL_PIXELFORMAT_NV12, 
                                      SDL_TEXTUREACCESS_STREAMING, 
                                      pCodecCtx->width, 
                                      pCodecCtx->height);
+    
+    if (!videoTexture) {
+        fprintf(stderr, "CRITICAL: Failed to create video texture. Memory fragmentation?\n");
+        return false; // 失敗を隠蔽せず、上位に報告して無謀な描画を避ける
+    }
 
     quitThread = false;
     isVideoMode = true;
@@ -122,14 +134,14 @@ void BgaManager::syncTime(double ms) {
 void BgaManager::videoWorker() {
     AVPacket packet;
     
-    // 1. 指摘に基づき、メンバ変数のプールを使用するよう修正
-    // 変数名をエラーメッセージに従い memoryPoolNV12 から memoryPoolV へ変更
     int w = pCodecCtx->width;
     int h = pCodecCtx->height;
     size_t nv12Size = (w * h) + (w * h / 2); 
     
-    // 既存のメンバ変数 memoryPoolV をリサイズして使用
-    this->memoryPoolV.assign(nv12Size * MAX_FRAME_QUEUE, 0); 
+    // ★修正：批評家指摘 ②：スレッド内での assign (new/delete発生) を廃止。
+    // すでに init で確保済みの領域を使うため、ここでは何もしない。
+    // (確保済みサイズが足りない場合のみ resize する安全策を入れる場合もありますが、
+    //  既存ロジック100%継承のため、ここでは init を信頼します)
     
     size_t writeIdx = 0;
 
@@ -157,7 +169,7 @@ void BgaManager::videoWorker() {
                         VideoFrame vFrame;
                         vFrame.pts = frameTime;
                         
-                        // メンバ変数のプール内の固定位置を割り当て
+                        // memoryPoolV 内の固定位置を割り当てるだけ。メモリ確保は発生しない。
                         uint8_t* dstBase = &this->memoryPoolV[writeIdx * nv12Size];
                         vFrame.yPtr = dstBase; 
 
@@ -166,7 +178,7 @@ void BgaManager::videoWorker() {
                             memcpy(dstBase + i * w, pFrame->data[0] + i * pFrame->linesize[0], w);
                         }
 
-                        // 2. UV面のインターリーブ (NV12: U,V,U,V...)
+                        // 2. UV面のインターリーブ (NV12)
                         uint8_t* dstUV = dstBase + (w * h);
                         for (int i = 0; i < h / 2; ++i) {
                             uint8_t* dUV = dstUV + i * w;

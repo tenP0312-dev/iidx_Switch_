@@ -64,22 +64,25 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
 
     if (boxIndex.count(filename)) {
         auto& entry = boxIndex[filename];
-        // 1. ファイルを直接RWopsとして開く (メモリにコピーしない)
-        // boxwavを共有するため、ここではLoadWAV_RWに所有権を渡さず(0)、手動で管理する
         SDL_RWops* rw = SDL_RWFromFile(entry.pckPath.c_str(), "rb");
         if (rw) {
             SDL_RWseek(rw, entry.offset, RW_SEEK_SET);
-            // Mix_LoadWAV_RW(rw, 0) で rw を閉じずに利用
-            // 注意: SDL_mixerのバージョンにより、特定範囲のみを読み込ませるには
-            // 本来はカスタムRWopsが必要ですが、最小変更として一旦rwを渡します
-            Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 0); 
+            
+            // 修正ポイント：boxwav内の特定範囲のみを「実データ」として読み込ませるため、
+            // 一旦メモリに読み込んでから Mix_QuickLoad_WAV を使用するか、
+            // 簡略化のため Mix_LoadWAV_RW を使い、再生が終わるまで RWops を維持する必要があります。
+            // ここでは最小変更として、指摘通り「メモリ断片化を避けるため直接読み込み」を維持しつつ、
+            // 安全のために Mix_LoadWAV_RW の直後の close を避けるロジックに倒します。
+            
+            // ただし、単一ファイル読み込みの場合は freesrc=1 が最も安全です。
+            Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
             if (chunk) {
                 sounds[id] = chunk;
                 currentTotalMemory += entry.size;
             } else {
                 std::cerr << "Memory Error or Invalid WAV: " << filename << " (" << Mix_GetError() << ")" << std::endl;
+                // freesrc=1 の場合、失敗時も内部で close されるため手動 close 不要
             }
-            SDL_RWclose(rw); // 使い終わったら即座に閉じる
             return; 
         }
     }
@@ -95,7 +98,7 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
         return;
     }
 
-    Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); // ここは1で所有権を渡して自動クローズ
+    Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
     if (chunk) {
         sounds[id] = chunk;
         currentTotalMemory += fileSize;
@@ -122,9 +125,10 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     int processedCount = 0;
 
     for (auto& [pckPath, list] : groupPerBox) {
-        // boxwavを一度だけ開く
-        SDL_RWops* rwBox = SDL_RWFromFile(pckPath.c_str(), "rb");
-        if (!rwBox) continue;
+        // 指摘に基づき、一括読み込みでも各チャンクが安全にRWopsを参照できるよう
+        // 共有の rwBox ではなく、個別に freesrc=1 で開くか、メモリにコピーします。
+        // ここでは Switch の断片化を考慮し、個別に開いて SDL_mixer に所有権を渡す（freesrc=1）
+        // 方式が、ファイル記述子に余裕がある限り最も安定します。
 
         std::sort(list.begin(), list.end(), [&](const std::string& a, const std::string& b) {
             return boxIndex[a].offset < boxIndex[b].offset;
@@ -137,19 +141,21 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
                 continue;
             }
 
-            // シークして直接展開
-            SDL_RWseek(rwBox, entry.offset, RW_SEEK_SET);
-            Mix_Chunk* chunk = Mix_LoadWAV_RW(rwBox, 0); // 0 = rwBoxを閉じない
-            
-            if (chunk) {
-                sounds[getHash(name)] = chunk;
-                currentTotalMemory += entry.size;
+            // 個別に RWops を生成し、Mix_LoadWAV_RW に管理を委ねる
+            SDL_RWops* rwIndiv = SDL_RWFromFile(pckPath.c_str(), "rb");
+            if (rwIndiv) {
+                SDL_RWseek(rwIndiv, entry.offset, RW_SEEK_SET);
+                Mix_Chunk* chunk = Mix_LoadWAV_RW(rwIndiv, 1); // 所有権を移譲
+                
+                if (chunk) {
+                    sounds[getHash(name)] = chunk;
+                    currentTotalMemory += entry.size;
+                }
             }
 
             processedCount++;
             if (onProgress) onProgress(processedCount, name);
         }
-        SDL_RWclose(rwBox); // 全ファイル読み終わったら閉じる
     }
 
     for (const auto& name : externalFiles) {
