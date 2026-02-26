@@ -68,6 +68,7 @@ void ScenePlay::updateAssist(double cur_ms, PlayEngine& engine, SoundManager& sn
 
 // --- メインロジック ---
 bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer, const std::string& bmsonPath) {
+    // 1. 前の曲の残骸を完全に消し去る (断片化対策の第一歩)
     {
         BgaManager tempBga;
         tempBga.cleanup(); 
@@ -77,12 +78,7 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     SDL_RenderPresent(ren);
     SDL_Delay(200); 
 
-    // 【削除】無意味な初期化処理を削除
-    // IMG_Quit();
-    // int imgFlags = IMG_INIT_PNG | IMG_INIT_JPG;
-    // IMG_Init(imgFlags);
-    SDL_Delay(50);
-
+    // 2. BMSONのパース (この内部でJSONがパースされ、そして即座に破棄される)
     int lastParsePercent = -1;
     BMSData data = BmsonLoader::load(bmsonPath, [&](float progress) {
         int curPercent = (int)(progress * 100);
@@ -96,6 +92,10 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
 
     if (data.sound_channels.empty()) return true;
 
+    // 3. パース終了～音声ロード開始の「隙間」を作る
+    // ここでJSONの巨大なメモリが解放され、ヒープに空きができる
+    SDL_Delay(100); 
+
     currentHeader = data.header;
     Config::HIGH_SPEED = (double)Config::HS_BASE / (std::max(1, Config::GREEN_NUMBER) * data.header.bpm);
 
@@ -103,15 +103,15 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     engine.init(data);
     drawStartIndex = 0;
     
+    // BGA初期化
     BgaManager bga;
     bga.init(data.bga_images.size());
     bga.setEvents(data.bga_events);      
     bga.setLayerEvents(data.layer_events); 
     bga.setPoorEvents(data.poor_events);   
 
-    // --- 【修正】メモリアロケーションによるプチフリーズを防止 ---
     effects.clear();
-    effects.reserve(64); // 余裕を持って確保
+    effects.reserve(64); 
     bombAnims.clear(); 
     bombAnims.reserve(64); 
     for(int i=0; i<9; ++i) lanePressed[i] = false;
@@ -144,8 +144,8 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
         bga.registerPath(id, filename);
     }
 
-    SDL_Delay(50);
-
+    // 4. 音声インデックス作成とバルクロード
+    // JSONが消えて「きれいになったヒープ」に対して大きな音声を確保しにいく
     std::string bmsonBaseName = "";
     size_t lastDot = bmsonPath.find_last_of(".");
     if (lastDot != std::string::npos && lastDot > lastSlash) {
@@ -159,10 +159,12 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     snd.preloadBoxIndex(bmsonDir, bmsonBaseName);
 
     std::vector<std::string> soundList;
+    soundList.reserve(data.sound_channels.size());
     for (const auto& ch : data.sound_channels) {
         soundList.push_back(ch.name);
     }
 
+    // 指摘のあった「二重消費」はSoundManager側で修正済みのため、安心して呼べる
     snd.loadSoundsInBulk(soundList, bmsonDir, bmsonBaseName, [&](int processedCount, const std::string& currentName) {
         int curPercent = (processedCount * 100) / (int)data.sound_channels.size();
         static int lastPercent = -1;
@@ -178,7 +180,7 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
             snprintf(memBuf, sizeof(memBuf), "WAV Memory: %.1f / %.1f MB", curMB, maxMB);
             renderer.drawText(ren, memBuf, 640, 580, {200, 200, 200, 255}, false, true);
             
-            if (curMem >= maxMem - (1024 * 10)) { 
+            if (curMem >= maxMem - (1024 * 1024 * 5)) { // 警告しきい値を5MB程度に調整
                 renderer.drawText(ren, "WARNING: MEMORY LIMIT REACHED (SKIPPING)", 640, 620, {255, 50, 50, 255}, false, true);
             }
             
@@ -188,7 +190,6 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
 
         if (processedCount % 100 == 0) {
             SDL_Event e; while(SDL_PollEvent(&e));
-            SDL_Delay(2);
         }
     });
 
