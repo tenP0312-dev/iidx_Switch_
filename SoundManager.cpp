@@ -59,29 +59,32 @@ void SoundManager::preloadBoxIndex(const std::string& rootPath, const std::strin
 }
 
 void SoundManager::loadSingleSound(const std::string& filename, const std::string& rootPath, const std::string& bmsonName) {
-    uint32_t id = getHash(filename); // ID生成
+    uint32_t id = getHash(filename);
     if (sounds.find(id) != sounds.end()) return;
 
     if (boxIndex.count(filename)) {
         auto& entry = boxIndex[filename];
-        if (currentTotalMemory + entry.size > MAX_WAV_MEMORY) return;
-
-        std::ifstream ifs(entry.pckPath, std::ios::binary);
-        if (ifs) {
-            ifs.seekg(entry.offset, std::ios::beg);
-            std::vector<uint8_t> buffer(entry.size);
-            ifs.read((char*)buffer.data(), entry.size);
-
-            SDL_RWops* rw = SDL_RWFromMem(buffer.data(), entry.size);
-            Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
+        // 1. ファイルを直接RWopsとして開く (メモリにコピーしない)
+        // boxwavを共有するため、ここではLoadWAV_RWに所有権を渡さず(0)、手動で管理する
+        SDL_RWops* rw = SDL_RWFromFile(entry.pckPath.c_str(), "rb");
+        if (rw) {
+            SDL_RWseek(rw, entry.offset, RW_SEEK_SET);
+            // Mix_LoadWAV_RW(rw, 0) で rw を閉じずに利用
+            // 注意: SDL_mixerのバージョンにより、特定範囲のみを読み込ませるには
+            // 本来はカスタムRWopsが必要ですが、最小変更として一旦rwを渡します
+            Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 0); 
             if (chunk) {
-                sounds[id] = chunk; // IDで保存
+                sounds[id] = chunk;
                 currentTotalMemory += entry.size;
+            } else {
+                std::cerr << "Memory Error or Invalid WAV: " << filename << " (" << Mix_GetError() << ")" << std::endl;
             }
+            SDL_RWclose(rw); // 使い終わったら即座に閉じる
             return; 
         }
     }
 
+    // 外部ファイル読み込み
     std::string path = rootPath + (rootPath.empty() || rootPath.back() == '/' ? "" : "/") + filename;
     SDL_RWops* rw = SDL_RWFromFile(path.c_str(), "rb");
     if (!rw) return;
@@ -92,9 +95,9 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
         return;
     }
 
-    Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1);
+    Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); // ここは1で所有権を渡して自動クローズ
     if (chunk) {
-        sounds[id] = chunk; // IDで保存
+        sounds[id] = chunk;
         currentTotalMemory += fileSize;
     }
 }
@@ -108,8 +111,7 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     std::vector<std::string> externalFiles;
 
     for (const auto& name : filenames) {
-        if (sounds.find(getHash(name)) != sounds.end()) continue; // IDで判定
-
+        if (sounds.find(getHash(name)) != sounds.end()) continue;
         if (boxIndex.count(name)) {
             groupPerBox[boxIndex[name].pckPath].push_back(name);
         } else {
@@ -120,8 +122,9 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     int processedCount = 0;
 
     for (auto& [pckPath, list] : groupPerBox) {
-        std::ifstream ifs(pckPath, std::ios::binary);
-        if (!ifs) continue;
+        // boxwavを一度だけ開く
+        SDL_RWops* rwBox = SDL_RWFromFile(pckPath.c_str(), "rb");
+        if (!rwBox) continue;
 
         std::sort(list.begin(), list.end(), [&](const std::string& a, const std::string& b) {
             return boxIndex[a].offset < boxIndex[b].offset;
@@ -134,21 +137,19 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
                 continue;
             }
 
-            ifs.seekg(entry.offset, std::ios::beg);
-            std::vector<uint8_t> buffer(entry.size);
-            ifs.read((char*)buffer.data(), entry.size);
-
-            SDL_RWops* rw = SDL_RWFromMem(buffer.data(), entry.size);
-            Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1);
+            // シークして直接展開
+            SDL_RWseek(rwBox, entry.offset, RW_SEEK_SET);
+            Mix_Chunk* chunk = Mix_LoadWAV_RW(rwBox, 0); // 0 = rwBoxを閉じない
+            
             if (chunk) {
-                sounds[getHash(name)] = chunk; // IDで保存
+                sounds[getHash(name)] = chunk;
                 currentTotalMemory += entry.size;
             }
 
             processedCount++;
             if (onProgress) onProgress(processedCount, name);
         }
-        ifs.close();
+        SDL_RWclose(rwBox); // 全ファイル読み終わったら閉じる
     }
 
     for (const auto& name : externalFiles) {

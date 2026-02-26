@@ -27017,23 +27017,51 @@ inline void swap(nlohmann::NLOHMANN_BASIC_JSON_TPL& j1, nlohmann::NLOHMANN_BASIC
 --- FILE: ./SceneDecision.cpp ---
 #include "SceneDecision.hpp"
 #include "Config.hpp"
+#include <SDL2/SDL.h>
+
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 
 bool SceneDecision::run(SDL_Renderer* ren, NoteRenderer& renderer, const BMSHeader& header) {
-    // 既存の描画ロジックを100%継承
-    // 描画処理
-    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-    SDL_RenderClear(ren);
+    uint32_t startTime = SDL_GetTicks();
+    const uint32_t WAIT_MS = 3000;
 
-    // NoteRendererに実装した情報を描画
-    renderer.renderDecisionInfo(ren, header);
+    // メインループを回しながら待機
+    while (SDL_GetTicks() - startTime < WAIT_MS) {
+        uint32_t now = SDL_GetTicks();
+        
+        // --- 1. OSおよび入力イベントの処理 ---
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) return false;
+            
+            // 待機中であっても決定ボタンが押されたら即開始するなどの
+            // ユーザー体験向上を入れる場合はここに記述（今回は3秒待機を維持）
+        }
 
-    // 画面に反映
-    SDL_RenderPresent(ren);
+        #ifdef __SWITCH__
+        // Switch特有のシステム要求（スリープ、ホームボタン等）をチェック
+        if (!appletMainLoop()) return false;
+        #endif
 
-    // 指定された要件に基づき、ボタン入力を待たず3秒間（3000ms）表示
-    SDL_Delay(3000);
+        // --- 2. 描画処理 (既存ロジック100%継承) ---
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+        SDL_RenderClear(ren);
 
-    // プレイ画面へ遷移するため常にtrueを返す
+        // 既存の情報を描画
+        renderer.renderDecisionInfo(ren, header);
+
+        // 必要であれば「PRESS ANY BUTTON TO SKIP」などの点滅表示もここで可能
+        
+        // 画面に反映
+        SDL_RenderPresent(ren);
+
+        // --- 3. CPU負荷の調整 ---
+        // 毎フレーム全力で回すとバッテリーを食うため、1ms程度休ませる
+        SDL_Delay(1);
+    }
+
     return true;
 }
 
@@ -29376,15 +29404,17 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
             continue;
         }
 
+        // target_ms順でソートされているため、未来のノートに到達したら即座に終了
         if (n.target_ms > cur_ms + 500.0) break;
 
         if (!n.isBGM) {
-            lastSoundPerLaneId[n.lane] = n.soundId; // IDを保存
+            lastSoundPerLaneId[n.lane] = n.soundId;
         }
 
         if (n.isBGM && n.target_ms <= cur_ms) {
-            snd.play(n.soundId); // ID再生
+            snd.play(n.soundId);
             n.played = true;
+            if (i == nextUpdateIndex) nextUpdateIndex++; // インデックス更新
         } 
         else if (!n.isBGM) {
             double adjusted_target = n.target_ms + Config::JUDGE_OFFSET;
@@ -29400,6 +29430,8 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
                 
                 judgeManager.updateGauge(status, 0, false, baseRecoveryPerNote); 
                 
+                if (i == nextUpdateIndex) nextUpdateIndex++; // インデックス更新
+
                 if (status.isFailed) {
                     snd.stopAll();
                     break;
@@ -29522,8 +29554,18 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
 void PlayEngine::processRelease(int lane, double cur_ms, uint32_t now) {
     if (status.isFailed) return;
 
-    for (auto& n : notes) {
-        if (!n.played && n.isLN && n.lane == lane && n.isBeingPressed) {
+    // notes全体を回すのではなく、判定が有効な範囲付近のみを探索
+    // LNの終端判定が必要なため、nextUpdateIndexから一定範囲、またはアクティブなLNを探す
+    for (size_t i = nextUpdateIndex; i < notes.size(); ++i) {
+        auto& n = notes[i];
+        
+        // すでに処理済みのノートは無視
+        if (n.played) continue;
+        
+        // 判定時間より遥か先のノートに到達したら中断
+        if (n.target_ms > cur_ms + 1000.0) break;
+
+        if (n.isLN && n.lane == lane && n.isBeingPressed) {
             double adjusted_end = (n.target_ms + n.duration_ms) + Config::JUDGE_OFFSET;
             double raw_diff = cur_ms - adjusted_end;
             double diff = std::abs(raw_diff);
@@ -29567,6 +29609,7 @@ void PlayEngine::processRelease(int lane, double cur_ms, uint32_t now) {
                 currentJudge = {"POOR", now, true, {255, 128, 0, 255}, false, false};
                 judgeManager.updateGauge(status, 0, false, baseRecoveryPerNote);
             }
+            // 該当するレーンのLNを1つ処理したら終了
             break;
         }
     }
