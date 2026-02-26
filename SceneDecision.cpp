@@ -1,21 +1,49 @@
 #include "SceneDecision.hpp"
 #include "Config.hpp"
+#include <SDL2/SDL.h>
+
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 
 bool SceneDecision::run(SDL_Renderer* ren, NoteRenderer& renderer, const BMSHeader& header) {
-    // 既存の描画ロジックを100%継承
-    // 描画処理
-    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
-    SDL_RenderClear(ren);
+    uint32_t startTime = SDL_GetTicks();
+    const uint32_t WAIT_MS = 3000;
 
-    // NoteRendererに実装した情報を描画
-    renderer.renderDecisionInfo(ren, header);
+    // メインループを回しながら待機
+    while (SDL_GetTicks() - startTime < WAIT_MS) {
+        uint32_t now = SDL_GetTicks();
+        
+        // --- 1. OSおよび入力イベントの処理 ---
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) return false;
+            
+            // 待機中であっても決定ボタンが押されたら即開始するなどの
+            // ユーザー体験向上を入れる場合はここに記述（今回は3秒待機を維持）
+        }
 
-    // 画面に反映
-    SDL_RenderPresent(ren);
+        #ifdef __SWITCH__
+        // Switch特有のシステム要求（スリープ、ホームボタン等）をチェック
+        if (!appletMainLoop()) return false;
+        #endif
 
-    // 指定された要件に基づき、ボタン入力を待たず3秒間（3000ms）表示
-    SDL_Delay(3000);
+        // --- 2. 描画処理 (既存ロジック100%継承) ---
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+        SDL_RenderClear(ren);
 
-    // プレイ画面へ遷移するため常にtrueを返す
+        // 既存の情報を描画
+        renderer.renderDecisionInfo(ren, header);
+
+        // 必要であれば「PRESS ANY BUTTON TO SKIP」などの点滅表示もここで可能
+        
+        // 画面に反映
+        SDL_RenderPresent(ren);
+
+        // --- 3. CPU負荷の調整 ---
+        // 毎フレーム全力で回すとバッテリーを食うため、1ms程度休ませる
+        SDL_Delay(1);
+    }
+
     return true;
 }
