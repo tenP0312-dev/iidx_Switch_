@@ -171,15 +171,17 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
             continue;
         }
 
+        // target_ms順でソートされているため、未来のノートに到達したら即座に終了
         if (n.target_ms > cur_ms + 500.0) break;
 
         if (!n.isBGM) {
-            lastSoundPerLaneId[n.lane] = n.soundId; // IDを保存
+            lastSoundPerLaneId[n.lane] = n.soundId;
         }
 
         if (n.isBGM && n.target_ms <= cur_ms) {
-            snd.play(n.soundId); // ID再生
+            snd.play(n.soundId);
             n.played = true;
+            if (i == nextUpdateIndex) nextUpdateIndex++; // インデックス更新
         } 
         else if (!n.isBGM) {
             double adjusted_target = n.target_ms + Config::JUDGE_OFFSET;
@@ -195,6 +197,8 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
                 
                 judgeManager.updateGauge(status, 0, false, baseRecoveryPerNote); 
                 
+                if (i == nextUpdateIndex) nextUpdateIndex++; // インデックス更新
+
                 if (status.isFailed) {
                     snd.stopAll();
                     break;
@@ -317,8 +321,18 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
 void PlayEngine::processRelease(int lane, double cur_ms, uint32_t now) {
     if (status.isFailed) return;
 
-    for (auto& n : notes) {
-        if (!n.played && n.isLN && n.lane == lane && n.isBeingPressed) {
+    // notes全体を回すのではなく、判定が有効な範囲付近のみを探索
+    // LNの終端判定が必要なため、nextUpdateIndexから一定範囲、またはアクティブなLNを探す
+    for (size_t i = nextUpdateIndex; i < notes.size(); ++i) {
+        auto& n = notes[i];
+        
+        // すでに処理済みのノートは無視
+        if (n.played) continue;
+        
+        // 判定時間より遥か先のノートに到達したら中断
+        if (n.target_ms > cur_ms + 1000.0) break;
+
+        if (n.isLN && n.lane == lane && n.isBeingPressed) {
             double adjusted_end = (n.target_ms + n.duration_ms) + Config::JUDGE_OFFSET;
             double raw_diff = cur_ms - adjusted_end;
             double diff = std::abs(raw_diff);
@@ -362,6 +376,7 @@ void PlayEngine::processRelease(int lane, double cur_ms, uint32_t now) {
                 currentJudge = {"POOR", now, true, {255, 128, 0, 255}, false, false};
                 judgeManager.updateGauge(status, 0, false, baseRecoveryPerNote);
             }
+            // 該当するレーンのLNを1つ処理したら終了
             break;
         }
     }
