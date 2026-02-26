@@ -122,11 +122,15 @@ void BgaManager::syncTime(double ms) {
 void BgaManager::videoWorker() {
     AVPacket packet;
     
-    // 1. NV12形式（Y面 + UVインターリーブ面）を一括確保
+    // 1. 指摘に基づき、メンバ変数のプールを使用するよう修正
+    // 変数名をエラーメッセージに従い memoryPoolNV12 から memoryPoolV へ変更
     int w = pCodecCtx->width;
     int h = pCodecCtx->height;
     size_t nv12Size = (w * h) + (w * h / 2); 
-    std::vector<uint8_t> memoryPoolNV12(nv12Size * MAX_FRAME_QUEUE);
+    
+    // 既存のメンバ変数 memoryPoolV をリサイズして使用
+    this->memoryPoolV.assign(nv12Size * MAX_FRAME_QUEUE, 0); 
+    
     size_t writeIdx = 0;
 
     while (!quitThread) {
@@ -153,11 +157,10 @@ void BgaManager::videoWorker() {
                         VideoFrame vFrame;
                         vFrame.pts = frameTime;
                         
-                        // プール内の固定位置を割り当て
-                        uint8_t* dstBase = &memoryPoolNV12[writeIdx * nv12Size];
+                        // メンバ変数のプール内の固定位置を割り当て
+                        uint8_t* dstBase = &this->memoryPoolV[writeIdx * nv12Size];
                         vFrame.yPtr = dstBase; 
 
-                        // --- 【最適化】デコードスレッド側でNV12化を完了させる ---
                         // 1. Y面のコピー
                         for (int i = 0; i < h; ++i) {
                             memcpy(dstBase + i * w, pFrame->data[0] + i * pFrame->linesize[0], w);
