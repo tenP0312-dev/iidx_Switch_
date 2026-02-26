@@ -122,13 +122,6 @@ void NoteRenderer::init(SDL_Renderer* ren) {
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
 }
 
-void NoteRenderer::clearTextCache() {
-    for (auto& pair : textTextureCache) {
-        if (pair.second) SDL_DestroyTexture(pair.second);
-    }
-    textTextureCache.clear();
-}
-
 void NoteRenderer::cleanup() {
     clearTextCache();
     if (fontSmall) TTF_CloseFont(fontSmall);
@@ -218,18 +211,34 @@ void NoteRenderer::drawText(SDL_Renderer* ren, const std::string& text, int x, i
 
 void NoteRenderer::drawTextCached(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter, bool isRight, const std::string& fontPath) {
     if (text.empty()) return;
-    std::string key = text + "_" + std::to_string(color.r) + std::to_string(color.g) + 
-                      std::to_string(color.b) + std::to_string(color.a) + 
-                      (isBig ? "_B" : "_S") + fontPath;
+
+    uint32_t rgba = (color.r << 24) | (color.g << 16) | (color.b << 8) | color.a;
+    TextCacheKey key = { text, rgba, isBig, fontPath };
+
     SDL_Texture* t = nullptr;
     int texW = 0, texH = 0;
-    if (textTextureCache.count(key)) {
-        t = textTextureCache[key];
-        SDL_QueryTexture(t, NULL, NULL, &texW, &texH);
-    } else {
 
-        if (textTextureCache.size() > 128){
-            clearTextCache();
+    auto it = textTextureCache.find(key);
+    
+    if (it != textTextureCache.end()) {
+        // ヒット：リストの先頭に移動（lruIt を使用）
+        lruList.erase(it->second.lruIt);
+        lruList.push_front(key);
+        it->second.lruIt = lruList.begin();
+        
+        t = it->second.texture;
+        texW = it->second.w;
+        texH = it->second.h;
+    } else {
+        // ミス：新規生成
+        if (textTextureCache.size() >= MAX_TEXT_CACHE) {
+            TextCacheKey oldestKey = lruList.back();
+            auto oldestIt = textTextureCache.find(oldestKey);
+            if (oldestIt != textTextureCache.end()) {
+                if (oldestIt->second.texture) SDL_DestroyTexture(oldestIt->second.texture);
+                textTextureCache.erase(oldestIt);
+            }
+            lruList.pop_back();
         }
 
         TTF_Font* targetFont = isBig ? fontBig : fontSmall;
@@ -240,14 +249,23 @@ void NoteRenderer::drawTextCached(SDL_Renderer* ren, const std::string& text, in
             }
             if (customFontCache.count(fontPath)) targetFont = customFontCache[fontPath];
         }
+        
         if (!targetFont) return;
+
         SDL_Surface* s = TTF_RenderUTF8_Blended(targetFont, text.c_str(), color);
         if (!s) return;
+        
         t = SDL_CreateTextureFromSurface(ren, s);
-        texW = s->w; texH = s->h;
+        texW = s->w;
+        texH = s->h;
         SDL_FreeSurface(s);
-        if (t) textTextureCache[key] = t;
+
+        if (t) {
+            lruList.push_front(key);
+            textTextureCache[key] = { t, texW, texH, lruList.begin() };
+        }
     }
+
     if (t) {
         int drawX = x;
         if (isCenter) drawX = x - texW / 2;
@@ -255,6 +273,15 @@ void NoteRenderer::drawTextCached(SDL_Renderer* ren, const std::string& text, in
         SDL_Rect dst = { drawX, y, texW, texH };
         SDL_RenderCopy(ren, t, NULL, &dst);
     }
+}
+
+// clearTextCacheも忘れずにLRUリストをクリアするように修正
+void NoteRenderer::clearTextCache() {
+    for (auto& pair : textTextureCache) {
+        if (pair.second.texture) SDL_DestroyTexture(pair.second.texture);
+    }
+    textTextureCache.clear();
+    lruList.clear();
 }
 
 void NoteRenderer::drawImage(SDL_Renderer* ren, const std::string& path, int x, int y, int w, int h, int alpha) {
