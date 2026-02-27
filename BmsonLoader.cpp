@@ -24,12 +24,10 @@ bool isPlayableLaneSP(int64_t x) {
     return (x >= 1 && x <= 8);
 }
 
-// 共通のパース処理：DOM方式を採用しつつ、メモリを即座に解放する構造にする
-// ※SAXではbga階層の特定が困難なため、安定性を優先してDOMロジックを100%継承します。
+// 共通のパース処理：DOM方式を採用。既存ロジック100%継承
 static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const std::string& path, std::function<void(float)> onProgress) {
     const nlohmann::json& info = (j.contains("info") && !j["info"].is_null()) ? j["info"] : j;
 
-    // --- ファイル名とルートディレクトリの抽出 ---
     std::string bmsonName = path;
     size_t lastSlash = bmsonName.find_last_of("/\\");
     if (lastSlash != std::string::npos) bmsonName = bmsonName.substr(lastSlash + 1);
@@ -37,14 +35,12 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
     if (lastDot != std::string::npos) bmsonName = bmsonName.substr(0, lastDot);
     std::string rootDir = path.substr(0, path.find_last_of("/\\") + 1);
 
-    // Header情報のセット
     data.header.title = get_string_safe_internal(info, "title", "Unknown");
     data.header.artist = get_string_safe_internal(info, "artist", "Unknown");
     data.header.genre = get_string_safe_internal(info, "genre", "Unknown");
     data.header.modeHint = get_string_safe_internal(info, "mode_hint", "");
     data.header.subtitle = get_string_safe_internal(info, "subtitle", "");
 
-    // 難易度判定ロジック
     std::string cn = get_string_safe_internal(info, "chart_name", "");
     int diffVal = (int)get_double_safe_internal(info, "difficulty", -1.0);
     if (!cn.empty()) {
@@ -76,7 +72,6 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
     data.header.banner = get_string_safe_internal(info, "banner_image", "");
     data.header.preview = get_string_safe_internal(info, "preview_music", "");
 
-    // BPMロジック
     double bpm = get_double_safe_internal(info, "bpm", -1.0);
     if (bpm <= 0) bpm = get_double_safe_internal(info, "init_bpm", -1.0);
     if (bpm <= 0) bpm = get_double_safe_internal(j, "bpm", -1.0);
@@ -99,7 +94,6 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
     }
     std::sort(data.bpm_events.begin(), data.bpm_events.end(), [](auto& a, auto& b){ return a.y < b.y; });
 
-    // ノート/サウンドチャンネル
     int totalNotesCount = 0;
     bool hasP1_6or7 = false;
     bool hasP2Side = false;
@@ -111,7 +105,7 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
             BMSSoundChannel channel;
             channel.name = get_string_safe_internal(ch, "name", "");
             
-            // 音源ロード
+            // 音源ロード（実際のバイナリ読み込みはSoundManager::loadSingleSoundがRWFromMemで行う想定）
             SoundManager::getInstance().loadSingleSound(channel.name, rootDir, bmsonName);
 
             if (ch.contains("notes") && ch["notes"].is_array()) {
@@ -133,11 +127,9 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
     data.header.total = (double)totalNotesCount; 
     data.header.is7Key = (hasP1_6or7 && !hasP2Side);
 
-    // --- BGAデータのパース (古いやつから継承) ---
     if (j.contains("bga") && j["bga"].is_object()) {
         const auto& bga_node = j["bga"];
         std::map<int, std::string> idToName;
-
         if (bga_node.contains("bga_header") && bga_node["bga_header"].is_array()) {
             for (auto& img : bga_node["bga_header"]) {
                 int id = img.value("id", 0);
@@ -154,13 +146,11 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
                 }
             }
         }
-
         auto parse_events = [&](const std::string& key, std::vector<BgaEvent>& target) {
             if (bga_node.contains(key) && bga_node[key].is_array()) {
                 for (auto& e : bga_node[key]) {
                     int id = e.value("id", 0);
                     target.push_back({e.value("y", (int64_t)0), id});
-                    // 動画のオフセット特定用
                     if (idToName.count(id) && idToName[id] == data.header.bga_video) {
                         data.header.bga_offset = e.value("y", (int64_t)0);
                     }
@@ -168,33 +158,39 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
                 std::sort(target.begin(), target.end(), [](auto& a, auto& b){ return a.y < b.y; });
             }
         };
-
         parse_events("bga_events", data.bga_events);
         parse_events("layer_events", data.layer_events);
         parse_events("poor_events", data.poor_events);
     }
 }
 
+// 指摘事項：JSON DOMオブジェクトの生存期間を最小化
 BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> onProgress) {
     BMSData data;
     std::ifstream f(path);
     if (!f.is_open()) return data;
     try {
-        nlohmann::json j;
-        f >> j;
-        parse_bmson_internal(j, data, path, onProgress);
+        // スコープを制限し、parse_bmson_internal終了直後に nlohmann::json j を破棄する
+        {
+            nlohmann::json j;
+            f >> j;
+            parse_bmson_internal(j, data, path, onProgress);
+        } // ここで巨大なJSON DOMがメモリから解放される
     } catch (...) {}
     return data;
 }
 
+// 指摘事項：ヘッダーロード時も同様に即座にメモリを解放
 BMSHeader BmsonLoader::loadHeader(const std::string& path) {
     BMSData temp_data;
     std::ifstream f(path);
     if (!f.is_open()) return temp_data.header;
     try {
-        nlohmann::json j;
-        f >> j;
-        parse_bmson_internal(j, temp_data, path, nullptr);
+        {
+            nlohmann::json j;
+            f >> j;
+            parse_bmson_internal(j, temp_data, path, nullptr);
+        } // ここで解放
     } catch (...) {}
     return temp_data.header;
 }

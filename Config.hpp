@@ -10,14 +10,14 @@ namespace Config {
     // 画面・レイアウト設定
     inline int SCREEN_WIDTH = 1280;
     inline int SCREEN_HEIGHT = 720;
-    inline int JUDGMENT_LINE_Y = 600;
+    inline int JUDGMENT_LINE_Y = 482;
     inline int LANE_WIDTH = 60;
     inline int SCRATCH_WIDTH = 90;
     inline int LANE_START_X = 385;
 
     // --- ゲームプレイ設定 (IIDX 仕様アップデート) ---
     inline constexpr int HS_BASE = 174728;
-    inline int VISIBLE_PX = 600;
+    inline int VISIBLE_PX = 482;
     inline int GREEN_NUMBER = 300; 
     
     inline double HIGH_SPEED = 1.0; 

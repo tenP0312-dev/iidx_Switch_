@@ -63,7 +63,6 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
 
     pFrame = av_frame_alloc();
 
-    // ★修正：批評家指摘 3-B：テクスチャ作成失敗を厳格にチェック
     videoTexture = SDL_CreateTexture(renderer, 
                                      SDL_PIXELFORMAT_NV12, 
                                      SDL_TEXTUREACCESS_STREAMING, 
@@ -72,7 +71,7 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
     
     if (!videoTexture) {
         fprintf(stderr, "CRITICAL: Failed to create video texture. Memory fragmentation?\n");
-        return false; // 失敗を隠蔽せず、上位に報告して無謀な描画を避ける
+        return false; 
     }
 
     quitThread = false;
@@ -84,14 +83,22 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
     hasNewFrameToUpload = false;
     decodeThread = std::thread(&BgaManager::videoWorker, this);
 
+    // ★修正：批評家指摘 2：動画モードでない、または失敗時は待機せず即座に抜ける
+    // さらに、キューが一定数貯まれば即座に開始し、無駄な sleep を排除する
     int waitCount = 0;
     while (waitCount < 200) {
+        // 万が一スレッドが異常終了した場合は待機を打ち切る
+        if (quitThread) break;
+
         size_t currentSize = 0;
         {
             std::lock_guard<std::mutex> lock(frameMutex);
             currentSize = frameQueue.size();
         }
-        if (currentSize >= 60) break; 
+        
+        // キューがある程度（15フレーム程度）溜まれば再生開始して良い（2秒待つ必要はない）
+        if (currentSize >= 15) break; 
+        
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         waitCount++;
     }

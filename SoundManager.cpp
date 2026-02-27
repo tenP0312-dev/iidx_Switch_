@@ -64,24 +64,25 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
 
     if (boxIndex.count(filename)) {
         auto& entry = boxIndex[filename];
-        SDL_RWops* rw = SDL_RWFromFile(entry.pckPath.c_str(), "rb");
-        if (rw) {
-            SDL_RWseek(rw, entry.offset, RW_SEEK_SET);
-            
-            // 修正ポイント：boxwav内の特定範囲のみを「実データ」として読み込ませるため、
-            // 一旦メモリに読み込んでから Mix_QuickLoad_WAV を使用するか、
-            // 簡略化のため Mix_LoadWAV_RW を使い、再生が終わるまで RWops を維持する必要があります。
-            // ここでは最小変更として、指摘通り「メモリ断片化を避けるため直接読み込み」を維持しつつ、
-            // 安全のために Mix_LoadWAV_RW の直後の close を避けるロジックに倒します。
-            
-            // ただし、単一ファイル読み込みの場合は freesrc=1 が最も安全です。
-            Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
-            if (chunk) {
-                sounds[id] = chunk;
-                currentTotalMemory += entry.size;
-            } else {
-                std::cerr << "Memory Error or Invalid WAV: " << filename << " (" << Mix_GetError() << ")" << std::endl;
-                // freesrc=1 の場合、失敗時も内部で close されるため手動 close 不要
+        
+        // 修正ポイント：SDL_RWFromMem を使い、指定サイズ分のみをメモリに読み込む
+        std::ifstream ifs(entry.pckPath, std::ios::binary);
+        if (ifs) {
+            uint8_t* tempBuf = (uint8_t*)SDL_malloc(entry.size);
+            if (tempBuf) {
+                ifs.seekg(entry.offset);
+                ifs.read((char*)tempBuf, entry.size);
+
+                // freesrc=1 により、rw 自体は Mix_LoadWAV_RW 内で解放される
+                SDL_RWops* rw = SDL_RWFromMem(tempBuf, entry.size);
+                Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
+                
+                if (chunk) {
+                    sounds[id] = chunk;
+                    currentTotalMemory += entry.size;
+                    // 指摘：Mix_Chunkは内部でデータを所有するため、読み込み直後にバッファを解放可能
+                }
+                SDL_free(tempBuf);
             }
             return; 
         }
@@ -125,14 +126,12 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     int processedCount = 0;
 
     for (auto& [pckPath, list] : groupPerBox) {
-        // 指摘に基づき、一括読み込みでも各チャンクが安全にRWopsを参照できるよう
-        // 共有の rwBox ではなく、個別に freesrc=1 で開くか、メモリにコピーします。
-        // ここでは Switch の断片化を考慮し、個別に開いて SDL_mixer に所有権を渡す（freesrc=1）
-        // 方式が、ファイル記述子に余裕がある限り最も安定します。
-
         std::sort(list.begin(), list.end(), [&](const std::string& a, const std::string& b) {
             return boxIndex[a].offset < boxIndex[b].offset;
         });
+
+        std::ifstream ifs(pckPath, std::ios::binary);
+        if (!ifs) continue;
 
         for (const auto& name : list) {
             auto& entry = boxIndex[name];
@@ -141,16 +140,20 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
                 continue;
             }
 
-            // 個別に RWops を生成し、Mix_LoadWAV_RW に管理を委ねる
-            SDL_RWops* rwIndiv = SDL_RWFromFile(pckPath.c_str(), "rb");
-            if (rwIndiv) {
-                SDL_RWseek(rwIndiv, entry.offset, RW_SEEK_SET);
-                Mix_Chunk* chunk = Mix_LoadWAV_RW(rwIndiv, 1); // 所有権を移譲
+            // 修正ポイント：一括読み込みでも RWFromMem 方式を採用し過剰確保を防止
+            uint8_t* tempBuf = (uint8_t*)SDL_malloc(entry.size);
+            if (tempBuf) {
+                ifs.seekg(entry.offset);
+                ifs.read((char*)tempBuf, entry.size);
+
+                SDL_RWops* rwIndiv = SDL_RWFromMem(tempBuf, entry.size);
+                Mix_Chunk* chunk = Mix_LoadWAV_RW(rwIndiv, 1);
                 
                 if (chunk) {
                     sounds[getHash(name)] = chunk;
                     currentTotalMemory += entry.size;
                 }
+                SDL_free(tempBuf);
             }
 
             processedCount++;
@@ -164,9 +167,6 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
         if (onProgress) onProgress(processedCount, name);
     }
 }
-
-// --- play 関数の重複を削除 ---
-// 以前の void SoundManager::play(int channel_id) { ... } は完全に消去してください。
 
 void SoundManager::play(int soundId) { 
     uint32_t id = static_cast<uint32_t>(soundId);
