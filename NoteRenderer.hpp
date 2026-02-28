@@ -143,6 +143,7 @@ private:
     TextureRegion texLaneCover;
     TextureRegion texGaugeAssist, texGaugeNormal, texGaugeHard,
                   texGaugeExHard, texGaugeHazard, texGaugeDan;
+    TextureRegion texGaugeFrame; // ★修正: init()でロード済み。renderGauge()内で毎フレーム string生成+map探索を行っていた問題を修正。
     TextureRegion texKeys, tex_scratch, tex_scratch_center;
 
     void loadAndCache(SDL_Renderer* ren, TextureRegion& region, const std::string& path);
@@ -160,6 +161,8 @@ private:
 };
 
 #endif // NOTERENDERER_HPP
+
+
 
 
 

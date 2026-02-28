@@ -180,8 +180,12 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
 
 void SoundManager::play(int soundId) {
     uint32_t id = static_cast<uint32_t>(soundId);
-    if (sounds.count(id) && sounds[id] != nullptr) {
-        Mix_Chunk* targetChunk = sounds[id];
+    // ★修正: sounds.count(id) + sounds[id] の二重ハッシュ計算を廃止。
+    //        find() でイテレータを1回取得し、以降はイテレータ経由で直接アクセスする。
+    //        1音再生ごとにハッシュ計算が2→1回になる。
+    auto it = sounds.find(id);
+    if (it != sounds.end() && it->second != nullptr) {
+        Mix_Chunk* targetChunk = it->second;
         int newChannel = Mix_PlayChannel(-1, targetChunk, 0);
 
         if (newChannel == -1) {
@@ -258,6 +262,8 @@ void SoundManager::cleanup() {
     clear();
     Mix_CloseAudio();
 }
+
+
 
 
 

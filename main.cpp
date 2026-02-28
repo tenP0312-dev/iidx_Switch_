@@ -142,7 +142,10 @@ int main(int argc, char* argv[]) {
     }
     
     bool quitApp = false;
-    int onemoreTimer = 0; // 演出用タイマー
+    // ★修正: フレームカウンタ(fps依存) → SDL_GetTicks() ミリ秒ベースに変更。
+    //        旧: onemoreTimer++ / if(onemoreTimer >= 180) → 60fps=3秒、30fps=6秒で不一致。
+    //        新: 入場時刻を記録し、経過ms で判定 → fps に依存しない。
+    uint32_t onemoreStartTime = 0;
 
     while (!quitApp) {
 #ifdef __SWITCH__
@@ -238,7 +241,7 @@ int main(int argc, char* argv[]) {
                                     if (sceneSelect.isExtraFolderSelected()) {
                                         globalCurrentStage = 5; 
                                         currentState = AppState::ONEMORE_ENTRY;
-                                        onemoreTimer = 0;
+                                        // onemoreStartTime は ONEMORE_ENTRY ステート内で初回フレームに記録する
                                     } else {
                                         sceneGameOver.init();
                                         currentState = AppState::GAMEOVER;
@@ -274,18 +277,23 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
                 SDL_RenderClear(ren);
 
-                onemoreTimer++;
-                
+                uint32_t now = SDL_GetTicks();
+                // ★修正: ステート初回エントリ時刻を記録する
+                if (onemoreStartTime == 0) onemoreStartTime = now;
+                uint32_t elapsed = now - onemoreStartTime;
+
+                // 点滅は elapsed ms ベースで決定論的に制御 (10ms周期交互)
                 SDL_Color gold = {255, 215, 0, 255};
-                SDL_Color red = {255, 50, 50, 255};
-                
-                SDL_Color currentMsgColor = (onemoreTimer / 10 % 2 == 0) ? gold : red;
-                
+                SDL_Color red  = {255, 50, 50, 255};
+                SDL_Color currentMsgColor = ((elapsed / 167) % 2 == 0) ? gold : red; // ~167ms = 60fpsの10フレーム相当
+
                 renderer.drawText(ren, "ONE MORE EXTRA STAGE", 640, 360, currentMsgColor, true, true);
-                
-                if (onemoreTimer >= 180) {
+
+                // 3000ms = 3秒固定 (fps 非依存)
+                if (elapsed >= 3000) {
                     sceneSelect.init(false, ren, renderer, globalCurrentStage);
                     currentState = AppState::SELECT;
+                    onemoreStartTime = 0; // 次回エントリに備えてリセット
                 }
 
                 SDL_RenderPresent(ren);
@@ -319,6 +327,8 @@ int main(int argc, char* argv[]) {
     
     return 0;
 }
+
+
 
 
 

@@ -358,70 +358,84 @@ int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& 
 }
 
 void PlayEngine::processRelease(int lane, double cur_ms, uint32_t now) {
-    if (status.isFailed) return;
+    if (status.isFailed || lane < 1 || lane > 8) return;
 
-    for (size_t i = nextUpdateIndex; i < notes.size(); ++i) {
-        auto& n = notes[i];
+    // ★修正: nextUpdateIndex からの O(N) 全スキャンを廃止。
+    //        processHit() と同じ laneNoteIndices ベースの O(M) 探索に統一する。
+    //        旧実装は processHit() だけ O(1) に改善して processRelease() が手つかずのままだった。
+    //        LN が多い譜面でボタンを離すたびに全ノーツを線形スキャンしていたため、
+    //        LN リリース時の入力遅延として顕在化していた。
+    const auto& indices = laneNoteIndices[lane];
+    size_t& startIdx    = laneSearchStart[lane];
 
-        if (n.played) continue;
-        if (n.target_ms > cur_ms + 1000.0) break;
+    // played かつ LN を保持していないノーツは開始位置を前進させる
+    while (startIdx < indices.size()
+           && notes[indices[startIdx]].played
+           && !notes[indices[startIdx]].isBeingPressed) {
+        startIdx++;
+    }
 
-        if (n.isLN && n.lane == lane && n.isBeingPressed) {
-            double adjusted_end = (n.target_ms + n.duration_ms) + Config::JUDGE_OFFSET;
-            double raw_diff     = cur_ms - adjusted_end;
-            double diff         = std::abs(raw_diff);
+    for (size_t k = startIdx; k < indices.size(); ++k) {
+        auto& n = notes[indices[k]];
+        if (n.played && !n.isBeingPressed) { startIdx = k + 1; continue; }
 
-            if (diff <= Config::JUDGE_BAD) {
-                n.isBeingPressed = false;
-                n.played         = true;
-                status.remainingNotes--;
+        // isBeingPressed の LN のみが対象
+        if (!n.isLN || !n.isBeingPressed) continue;
 
-                int  judgeType = 0;
-                bool isFast    = (raw_diff < 0);
-                bool isSlow    = (raw_diff > 0);
+        double adjusted_end = (n.target_ms + n.duration_ms) + Config::JUDGE_OFFSET;
+        double raw_diff     = cur_ms - adjusted_end;
+        double diff         = std::abs(raw_diff);
 
-                if (diff <= Config::JUDGE_PGREAT) {
-                    status.pGreatCount++; status.combo++; judgeType = 3;
-                    status.exScore += 2;
-                    isFast = false; isSlow = false;
-                } else if (diff <= Config::JUDGE_GREAT) {
-                    status.greatCount++; status.combo++; judgeType = 2;
-                    status.exScore += 1;
-                    if (isFast) status.fastCount++; else status.slowCount++;
-                } else if (diff <= Config::JUDGE_GOOD) {
-                    status.goodCount++; status.combo++; judgeType = 1;
-                    if (isFast) status.fastCount++; else status.slowCount++;
-                } else {
-                    status.badCount++; status.combo = 0; judgeType = 0;
-                    isFast = false; isSlow = false;
-                }
+        if (diff <= Config::JUDGE_BAD) {
+            n.isBeingPressed = false;
+            n.played         = true;
+            status.remainingNotes--;
 
-                auto uiData = judgeManager.getJudgeUIData(judgeType);
-                currentJudge.kind      = uiData.kind;
-                currentJudge.startTime = now;
-                currentJudge.active    = true;
-                currentJudge.isFast    = isFast;
-                currentJudge.isSlow    = isSlow;
+            int  judgeType = 0;
+            bool isFast    = (raw_diff < 0);
+            bool isSlow    = (raw_diff > 0);
 
-                if (status.combo > status.maxCombo) status.maxCombo = status.combo;
-                judgeManager.updateGauge(status, judgeType, true, baseRecoveryPerNote);
+            if (diff <= Config::JUDGE_PGREAT) {
+                status.pGreatCount++; status.combo++; judgeType = 3;
+                status.exScore += 2;
+                isFast = false; isSlow = false;
+            } else if (diff <= Config::JUDGE_GREAT) {
+                status.greatCount++; status.combo++; judgeType = 2;
+                status.exScore += 1;
+                if (isFast) status.fastCount++; else status.slowCount++;
+            } else if (diff <= Config::JUDGE_GOOD) {
+                status.goodCount++; status.combo++; judgeType = 1;
+                if (isFast) status.fastCount++; else status.slowCount++;
             } else {
-                n.isBeingPressed = false;
-                n.played         = true;
-                status.remainingNotes--;
-                status.poorCount++;
-                status.combo = 0;
-
-                currentJudge.kind      = JudgeKind::POOR;
-                currentJudge.startTime = now;
-                currentJudge.active    = true;
-                currentJudge.isFast    = false;
-                currentJudge.isSlow    = false;
-
-                judgeManager.updateGauge(status, 0, false, baseRecoveryPerNote);
+                status.badCount++; status.combo = 0; judgeType = 0;
+                isFast = false; isSlow = false;
             }
-            break;
+
+            auto uiData = judgeManager.getJudgeUIData(judgeType);
+            currentJudge.kind      = uiData.kind;
+            currentJudge.startTime = now;
+            currentJudge.active    = true;
+            currentJudge.isFast    = isFast;
+            currentJudge.isSlow    = isSlow;
+
+            if (status.combo > status.maxCombo) status.maxCombo = status.combo;
+            judgeManager.updateGauge(status, judgeType, true, baseRecoveryPerNote);
+        } else {
+            n.isBeingPressed = false;
+            n.played         = true;
+            status.remainingNotes--;
+            status.poorCount++;
+            status.combo = 0;
+
+            currentJudge.kind      = JudgeKind::POOR;
+            currentJudge.startTime = now;
+            currentJudge.active    = true;
+            currentJudge.isFast    = false;
+            currentJudge.isSlow    = false;
+
+            judgeManager.updateGauge(status, 0, false, baseRecoveryPerNote);
         }
+        break;
     }
 }
 
@@ -435,6 +449,8 @@ void PlayEngine::forceFail() {
     status.gauge     = 0.0;
     status.clearType = ClearType::FAILED;
 }
+
+
 
 
 

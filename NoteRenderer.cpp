@@ -105,6 +105,9 @@ void NoteRenderer::init(SDL_Renderer* ren) {
     loadAndCache(ren, texGaugeExHard, s + "gauge_exhard.png");
     loadAndCache(ren, texGaugeHazard, s + "gauge_hazard.png");
     loadAndCache(ren, texGaugeDan,    s + "gauge_dan.png");
+    // ★修正: gauge_frame は init() で一度だけロードする。
+    //        旧実装は renderGauge() 内で毎フレーム std::string 生成 + std::map 探索 + 初回 I/O が走っていた。
+    loadAndCache(ren, texGaugeFrame,  s + "gauge_frame.png");
 
     loadAndCache(ren, texKeys,      s + "7keypad.png");
     loadAndCache(ren, lane_Flame,   s + "lane_Flame.png");
@@ -150,6 +153,7 @@ void NoteRenderer::cleanup() {
     texJudgeAtlas.reset(); texNumberAtlas.reset(); texLaneCover.reset();
     texGaugeAssist.reset(); texGaugeNormal.reset(); texGaugeHard.reset();
     texGaugeExHard.reset(); texGaugeHazard.reset(); texGaugeDan.reset();
+    texGaugeFrame.reset(); // ★修正: texGaugeFrame を解放
     texKeys.reset();
     lane_Flame.reset(); lane_Flame2.reset();
     tex_scratch.reset(); tex_scratch_center.reset();
@@ -568,9 +572,10 @@ void NoteRenderer::renderGauge(SDL_Renderer* ren, double gaugeValue, int gaugeOp
         dGH = std::min(25, (int)(totalW * ((float)target->h / target->w)));
     int gY = (Config::SCREEN_HEIGHT - 40) - dGH;
 
-    std::string fPath = Config::ROOT_PATH + "Skin/gauge_frame.png";
-    if (textureCache.find(fPath) == textureCache.end()) loadAndCache(ren, textureCache[fPath], fPath);
-    TextureRegion* fTR = textureCache.count(fPath) ? &textureCache[fPath] : nullptr;
+    // ★修正: gauge_frame はメンバ変数 texGaugeFrame から直接参照。
+    //        旧実装では毎フレーム std::string 生成 → std::map::find() (O(log N)) →
+    //        初回はファイル I/O まで走る3重の無駄があった。
+    const TextureRegion* fTR = texGaugeFrame ? &texGaugeFrame : nullptr;
 
     if (target && *target) {
         if (fTR && *fTR) {
@@ -591,9 +596,17 @@ void NoteRenderer::renderGauge(SDL_Renderer* ren, double gaugeValue, int gaugeOp
         // GAUGE_DISPLAY_TYPE==1: 2刻み偶数表示、それ以外: そのまま
         int displayVal = std::clamp((int)gaugeValue, 0, 100);
         int activeS = (Config::GAUGE_DISPLAY_TYPE == 1) ? ((displayVal / 2) * 2) / 2 : displayVal / 2;
+
+        // ★修正: rand() を完全廃止。
+        //        rand() はグローバル状態を持ちスレッド不安全。srand() 未設定では毎回同じ列が出る。
+        //        SDL_GetTicks() ベースの決定論的アニメーションに統一する。
+        //        旧条件: rand() % 100 < 50 (= 50%の確率で点滅)
+        //        新条件: (SDL_GetTicks() / 60 + i) % 2 == 0 (セグメント i ごとに位相をずらした点滅)
+        //        これによりランダムではなく「交互点滅」になるが視覚的には同等で deterministic。
+        uint32_t ticks = SDL_GetTicks();
         for (int i = 0; i < 50; i++) {
             if (i < activeS && (i == activeS - 1 || i < activeS - 4
-                || rand() % 100 < 50 || (SDL_GetTicks() / 60) % 2 == 0)) {
+                || (ticks / 60 + i) % 2 == 0)) {
                 int cP = (int)(i * segW), nP = (int)((i + 1) * segW);
                 int dx = (Config::PLAY_SIDE == 1) ? (gX + cP) : (gX + totalW - nP);
                 SDL_Rect dR = { dx, gY, nP - cP, dGH };
@@ -627,19 +640,29 @@ void NoteRenderer::renderResult(SDL_Renderer* ren, const PlayStatus& status,
     SDL_SetRenderDrawColor(ren, 5, 5, 10, 255); SDL_RenderClear(ren);
     SDL_Color white  = {255, 255, 255, 255};
     SDL_Color yellow = {255, 255,   0, 255};
-    // ★修正：リザルト画面の固定テキストは drawTextCached を使用
     drawTextCached(ren, header.title,       640, 50,  white, true, true);
     drawTextCached(ren, "RANK: " + rank,    640, 120, yellow, true, true);
     int sY = 240, sp = 45;
-    // 数値は毎回変わらないので drawText でもよいが、リザルトはフレーム数が少ないため許容範囲
-    drawText(ren, "P-GREAT : " + std::to_string(status.pGreatCount), 400, sY,         white, false);
-    drawText(ren, "GREAT   : " + std::to_string(status.greatCount),  400, sY + sp,    white, false);
-    drawText(ren, "GOOD    : " + std::to_string(status.goodCount),   400, sY + sp*2,  white, false);
-    drawText(ren, "BAD     : " + std::to_string(status.badCount),    400, sY + sp*3,  white, false);
-    drawText(ren, "POOR    : " + std::to_string(status.poorCount),   400, sY + sp*4,  white, false);
-    drawText(ren, "MAX COMBO : " + std::to_string(status.maxCombo),  680, sY,         yellow, false);
-    drawText(ren, "EX SCORE  : " + std::to_string((status.pGreatCount * 2) + status.greatCount),
-                  680, sY + sp, white, false);
+
+    // ★修正: drawText(... + std::to_string()) による毎フレームのヒープアロケーションを廃止。
+    //        snprintf でスタックバッファに書き、drawTextCached でテクスチャを再利用する。
+    //        値はリザルト画面中に変化しないので、drawTextCached のキャッシュが毎フレーム完全ヒットする。
+    char pgBuf[48], grBuf[48], gdBuf[48], bdBuf[48], prBuf[48], mcBuf[48], exBuf[48];
+    snprintf(pgBuf, sizeof(pgBuf), "P-GREAT : %d", status.pGreatCount);
+    snprintf(grBuf, sizeof(grBuf), "GREAT   : %d", status.greatCount);
+    snprintf(gdBuf, sizeof(gdBuf), "GOOD    : %d", status.goodCount);
+    snprintf(bdBuf, sizeof(bdBuf), "BAD     : %d", status.badCount);
+    snprintf(prBuf, sizeof(prBuf), "POOR    : %d", status.poorCount);
+    snprintf(mcBuf, sizeof(mcBuf), "MAX COMBO : %d", status.maxCombo);
+    snprintf(exBuf, sizeof(exBuf), "EX SCORE  : %d", (status.pGreatCount * 2) + status.greatCount);
+
+    drawTextCached(ren, pgBuf, 400, sY,        white,  false);
+    drawTextCached(ren, grBuf, 400, sY + sp,   white,  false);
+    drawTextCached(ren, gdBuf, 400, sY + sp*2, white,  false);
+    drawTextCached(ren, bdBuf, 400, sY + sp*3, white,  false);
+    drawTextCached(ren, prBuf, 400, sY + sp*4, white,  false);
+    drawTextCached(ren, mcBuf, 680, sY,        yellow, false);
+    drawTextCached(ren, exBuf, 680, sY + sp,   white,  false);
 
     // クリアタイプ表示
     std::string clearText  = "FAILED";
@@ -659,6 +682,8 @@ void NoteRenderer::renderResult(SDL_Renderer* ren, const PlayStatus& status,
     if ((SDL_GetTicks() / 500) % 2 == 0)
         drawTextCached(ren, "PRESS ANY BUTTON TO EXIT", 640, 650, {150, 150, 150, 255}, true, true);
 }
+
+
 
 
 
