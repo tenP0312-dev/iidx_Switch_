@@ -372,11 +372,14 @@ void NoteRenderer::renderLanes(SDL_Renderer* ren, double progress, int scratchSt
 }
 
 void NoteRenderer::renderNote(SDL_Renderer* ren, const PlayableNote& note,
-                               double cur_ms, double speed, bool isAuto) {
+                               int64_t cur_y, double pixels_per_y, bool isAuto) {
     int x = ll.x[note.lane], w = ll.w[note.lane];
     int judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
-    int headY  = judgeY - (int)((note.target_ms - cur_ms) * speed) - 8 - (int)Config::JUDGE_OFFSET;
-    if (note.isLN && note.isBeingPressed) headY = judgeY - 8 - (int)Config::JUDGE_OFFSET;
+
+    // headY: Y座標の差 × 定数（BPMに一切依存しない）
+    // cur_y がBPM連動で進むことでソフランが表現される
+    int headY = judgeY - (int)((note.y - cur_y) * pixels_per_y) - (int)Config::JUDGE_OFFSET;
+    if (note.isLN && note.isBeingPressed) headY = judgeY - (int)Config::JUDGE_OFFSET;
 
     const TextureRegion *target = nullptr, *lnB = nullptr, *lnA1 = nullptr, *lnA2 = nullptr, *lnS = nullptr, *lnE = nullptr;
     if (note.lane == 8) {
@@ -394,33 +397,41 @@ void NoteRenderer::renderNote(SDL_Renderer* ren, const PlayableNote& note,
     }
 
     if (note.isLN) {
-        int tailY = judgeY - (int)(((note.target_ms + note.duration_ms) - cur_ms) * speed)
-                    - 8 - (int)Config::JUDGE_OFFSET;
-        if (!(tailY > judgeY || headY < Config::SUDDEN_PLUS - 20)) {
+        // tailY: LN終点のY座標 = note.y + note.l（Yの長さ）
+        // 同じ pixels_per_y で計算するのでBPMに依存しない
+        int tailY = judgeY - (int)((note.y + note.l - cur_y) * pixels_per_y) - (int)Config::JUDGE_OFFSET;
+
+        bool shouldDraw = note.isBeingPressed
+            || !(tailY > judgeY || headY < (int)Config::SUDDEN_PLUS - 5000);
+
+        if (shouldDraw) {
             SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
             const TextureRegion* body = note.isBeingPressed
                 ? ((SDL_GetTicks() / 100 % 2 == 0) ? lnA1 : lnA2)
                 : lnB;
-            int dTY = std::max(tailY + 4, (int)Config::SUDDEN_PLUS);
-            int dHY = std::min(headY + 4, judgeY);
+
+            int dTY = std::max(tailY, (int)Config::SUDDEN_PLUS);
+            int dHY = std::min(headY, judgeY);
+
             if (dHY > dTY && body && *body) {
                 SDL_Rect r = { x + 4, dTY, w - 8, dHY - dTY };
                 SDL_RenderCopy(ren, body->texture, NULL, &r);
             }
-            if (tailY >= Config::SUDDEN_PLUS && tailY <= judgeY) {
+            if (tailY >= (int)Config::SUDDEN_PLUS && tailY <= judgeY) {
                 const TextureRegion* end = (lnE && *lnE) ? lnE : target;
                 if (end && *end) {
-                    SDL_Rect r = { x + 2, tailY, w - 4, end->h };
+                    SDL_Rect r = { x + 2, tailY - end->h, w - 4, end->h };
                     SDL_RenderCopy(ren, end->texture, NULL, &r);
                 }
             }
             SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
         }
     }
-    if (!(headY < Config::SUDDEN_PLUS || headY > judgeY)) {
+
+    if (!(headY < (int)Config::SUDDEN_PLUS || headY > judgeY + 20)) {
         const TextureRegion* head = (note.isLN && lnS && *lnS) ? lnS : target;
         if (head && *head) {
-            SDL_Rect r = { x + 2, headY, w - 4, head->h };
+            SDL_Rect r = { x + 2, headY - head->h, w - 4, head->h };
             if (isAuto) SDL_SetTextureAlphaMod(head->texture, 160);
             SDL_RenderCopy(ren, head->texture, NULL, &r);
             if (isAuto) SDL_SetTextureAlphaMod(head->texture, 255);
@@ -428,9 +439,14 @@ void NoteRenderer::renderNote(SDL_Renderer* ren, const PlayableNote& note,
     }
 }
 
-void NoteRenderer::renderBeatLine(SDL_Renderer* ren, double diff, double speed) {
+
+// ================================================================
+// NoteRenderer.cpp の renderBeatLine 実装を差し替えてください
+// ================================================================
+
+void NoteRenderer::renderBeatLine(SDL_Renderer* ren, double diff_y, double pixels_per_y) {
     int judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
-    int y      = judgeY - (int)(diff * speed) - (int)Config::JUDGE_OFFSET;
+    int y      = judgeY - (int)(diff_y * pixels_per_y) - (int)Config::JUDGE_OFFSET;
     if (y < Config::SUDDEN_PLUS || y > judgeY) return;
     SDL_SetRenderDrawColor(ren, 60, 60, 70, 255);
     SDL_RenderDrawLine(ren, ll.baseX, y, ll.baseX + ll.totalWidth, y);

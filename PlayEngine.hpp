@@ -13,7 +13,7 @@
 
 class PlayEngine {
 public:
-    void init(const BMSData& data);
+    void init(BMSData& data);
     void update(double cur_ms, uint32_t now, SoundManager& snd);
     int processHit(int lane, double cur_ms, uint32_t now, SoundManager& snd);
     void processRelease(int lane, double cur_ms, uint32_t now);

@@ -1,99 +1,32 @@
 #include "BgaManager.hpp"
 #include "Config.hpp"
 #include <SDL2/SDL_image.h>
-#include <iostream>
-#include <algorithm>
 #include <cstring>
-#include <thread>
+#include <algorithm>
+#include <cstdio>
 
 static const long long BMP_LOOK_AHEAD = 300000;
+
+// ============================================================
+//  init / loadBmp / preLoad
+// ============================================================
 
 void BgaManager::init(size_t expectedSize) {
     clear();
     textures.reserve(std::min((size_t)256, expectedSize));
-    // ★修正: メモリプールは動画解像度が確定してから loadBgaFile() で確保する
-    // init() 時点では動画サイズ不明のため、ここでは確保しない
 }
 
-bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
-    std::string targetPath = path;
-    if (targetPath.compare(0, 5, "sdmc:") == 0) targetPath.erase(0, 5);
+void BgaManager::loadBmp(int id, const std::string& fullPath, SDL_Renderer* renderer) {
+    if (textures.count(id)) return;
+    SDL_Surface* surf = IMG_Load(fullPath.c_str());
+    if (!surf) return;
 
-    if (isVideoMode) clear();
-
-    int err = avformat_open_input(&pFormatCtx, targetPath.c_str(), NULL, NULL);
-    if (err != 0) {
-        std::string filename = targetPath;
-        size_t lastSlash = targetPath.find_last_of("/\\");
-        if (lastSlash != std::string::npos) filename = targetPath.substr(lastSlash + 1);
-        std::string fallbackPath = Config::ROOT_PATH + "videos/" + filename;
-        if (fallbackPath.compare(0, 5, "sdmc:") == 0) fallbackPath.erase(0, 5);
-        err = avformat_open_input(&pFormatCtx, fallbackPath.c_str(), NULL, NULL);
-    }
-    if (err != 0) return false;
-
-    if (avformat_find_stream_info(pFormatCtx, NULL) < 0) return false;
-
-    videoStreamIdx = -1;
-    for (int i = 0; i < (int)pFormatCtx->nb_streams; i++) {
-        if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            videoStreamIdx = i;
-            break;
-        }
-    }
-    if (videoStreamIdx == -1) return false;
-
-    AVCodecParameters* pCodecPar = pFormatCtx->streams[videoStreamIdx]->codecpar;
-    const AVCodec* pCodec = avcodec_find_decoder(pCodecPar->codec_id);
-    if (!pCodec) return false;
-
-    pCodecCtx = avcodec_alloc_context3(pCodec);
-    avcodec_parameters_to_context(pCodecCtx, pCodecPar);
-    pCodecCtx->thread_count   = 2;
-    pCodecCtx->flags2         |= AV_CODEC_FLAG2_FAST;
-    pCodecCtx->workaround_bugs = 1;
-
-    if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0) return false;
-
-    pFrame = av_frame_alloc();
-
-    videoTexture = SDL_CreateTexture(renderer,
-                                     SDL_PIXELFORMAT_NV12,
-                                     SDL_TEXTUREACCESS_STREAMING,
-                                     pCodecCtx->width,
-                                     pCodecCtx->height);
-
-    if (!videoTexture) {
-        fprintf(stderr, "CRITICAL: Failed to create video texture.\n");
-        return false;
-    }
-
-    // ★修正：動画テクスチャのサイズを生成時に一度だけ記録する
-    videoTexW = pCodecCtx->width;
-    videoTexH = pCodecCtx->height;
-
-    // ★修正: 実際の動画解像度でプールを確保する
-    // init() 時の 1280x720 固定サイズではなく、コーデックが確定したここで計算する。
-    // 解像度不一致によるバッファオーバーフローを防ぐ。
-    poolSlotSize = (size_t)(videoTexW * videoTexH) + (size_t)(videoTexW * videoTexH / 2);
-    memoryPoolV.assign(poolSlotSize * MAX_FRAME_QUEUE, 0);
-
-    quitThread = false;
-    isVideoMode = true;
-    isReady.store(false, std::memory_order_release); // ★修正③: 準備未完了状態でリセット
-    {
-        std::lock_guard<std::mutex> lock(frameMutex);
-        frameQueue.clear();
-    }
-    hasNewFrameToUpload = false;
-    decodeThread = std::thread(&BgaManager::videoWorker, this);
-
-    // ★修正③: メインスレッドのブロッキングを完全に排除。
-    // 旧実装は最大 1000ms スリープしていたが、Switch では appletMainLoop() が
-    // 呼ばれない状態が続きシステムイベントが処理されずフリーズに見えていた。
-    // isReady フラグは videoWorker が MIN_FRAMES 分バッファを溜めた時点でセットされ、
-    // render() 側でガードすることで BGA 描画が安全に開始される。
-    return true;
+    BgaTextureEntry entry;
+    entry.w   = surf->w;
+    entry.h   = surf->h;
+    entry.tex = SDL_CreateTextureFromSurface(renderer, surf);
+    SDL_FreeSurface(surf);
+    if (entry.tex) textures[id] = entry;
 }
 
 void BgaManager::preLoad(long long startPulse, SDL_Renderer* renderer) {
@@ -110,216 +43,392 @@ void BgaManager::preLoad(long long startPulse, SDL_Renderer* renderer) {
         return false;
     };
     if (!scan(bgaEvents)) { if (!scan(layerEvents)) scan(poorEvents); }
-    if (nextNeededId != -1 && idToFilename.count(nextNeededId)) {
+    if (nextNeededId != -1 && idToFilename.count(nextNeededId))
         loadBmp(nextNeededId, baseDir + idToFilename[nextNeededId], renderer);
+}
+
+// ============================================================
+//  loadBgaFile
+// ============================================================
+
+bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
+    std::string targetPath = path;
+    if (targetPath.compare(0, 5, "sdmc:") == 0) targetPath.erase(0, 5);
+
+    if (isVideoMode) clear();
+
+    // --- フォーマットを開く (フォールバックパス付き) ---
+    int err = avformat_open_input(&pFormatCtx, targetPath.c_str(), NULL, NULL);
+    if (err != 0) {
+        size_t lastSlash = targetPath.find_last_of("/\\");
+        std::string filename = (lastSlash != std::string::npos)
+            ? targetPath.substr(lastSlash + 1) : targetPath;
+        std::string fallback = Config::ROOT_PATH + "videos/" + filename;
+        if (fallback.compare(0, 5, "sdmc:") == 0) fallback.erase(0, 5);
+        err = avformat_open_input(&pFormatCtx, fallback.c_str(), NULL, NULL);
     }
+    if (err != 0) return false;
+    if (avformat_find_stream_info(pFormatCtx, NULL) < 0) {
+        avformat_close_input(&pFormatCtx); pFormatCtx = nullptr;
+        return false;
+    }
+
+    // --- ビデオストリーム検索 ---
+    videoStreamIdx = -1;
+    for (int i = 0; i < (int)pFormatCtx->nb_streams; i++) {
+        if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            videoStreamIdx = i;
+            break;
+        }
+    }
+    if (videoStreamIdx == -1) {
+        avformat_close_input(&pFormatCtx); pFormatCtx = nullptr;
+        return false;
+    }
+
+    AVCodecParameters* pCodecPar = pFormatCtx->streams[videoStreamIdx]->codecpar;
+    int vW = pCodecPar->width;
+    int vH = pCodecPar->height;
+
+    // --- 動画制約チェック ---
+    // Switch の CPU/メモリ帯域を守るため、縦 256px・30fps を超える動画は拒否する。
+    // BGA は装飾なので品質より安定動作を優先する。
+    AVRational avgFps = pFormatCtx->streams[videoStreamIdx]->avg_frame_rate;
+    double fps = (avgFps.den > 0) ? (double)avgFps.num / avgFps.den : 30.0;
+
+    if (vH > MAX_VIDEO_HEIGHT) {
+        fprintf(stderr, "BGA: rejected — height %d > %d limit\n", vH, MAX_VIDEO_HEIGHT);
+        avformat_close_input(&pFormatCtx); pFormatCtx = nullptr;
+        return false;
+    }
+    if (fps > (double)MAX_VIDEO_FPS + 0.5) {
+        fprintf(stderr, "BGA: rejected — fps %.1f > %d limit\n", fps, MAX_VIDEO_FPS);
+        avformat_close_input(&pFormatCtx); pFormatCtx = nullptr;
+        return false;
+    }
+    videoFps = fps;
+
+    // --- コーデック初期化 ---
+    const AVCodec* pCodec = avcodec_find_decoder(pCodecPar->codec_id);
+    if (!pCodec) {
+        avformat_close_input(&pFormatCtx); pFormatCtx = nullptr;
+        return false;
+    }
+
+    pCodecCtx = avcodec_alloc_context3(pCodec);
+    avcodec_parameters_to_context(pCodecCtx, pCodecPar);
+
+    // ★ thread_count = 1: FFmpeg 内部スレッドを立てない。
+    //    videoWorker スレッドをコア2に固定するため、FFmpeg が追加スレッドを
+    //    立てると別コアに侵入してゲームスレッドに干渉する。
+    pCodecCtx->thread_count    = 1;
+    pCodecCtx->flags2         |= AV_CODEC_FLAG2_FAST;
+    pCodecCtx->workaround_bugs = 1;
+    // ループフィルタをスキップ: BGA は装飾なので多少ブロックノイズが出ても許容
+    // デコード時間を ~15% 削減できる
+    pCodecCtx->skip_loop_filter = AVDISCARD_NONREF;
+
+    if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0) {
+        avcodec_free_context(&pCodecCtx); pCodecCtx = nullptr;
+        avformat_close_input(&pFormatCtx); pFormatCtx = nullptr;
+        return false;
+    }
+
+    pFrame    = av_frame_alloc();
+    videoTexW = vW;
+    videoTexH = vH;
+
+    videoTexture = SDL_CreateTexture(renderer,
+                                     SDL_PIXELFORMAT_NV12,
+                                     SDL_TEXTUREACCESS_STREAMING,
+                                     videoTexW, videoTexH);
+    if (!videoTexture) {
+        fprintf(stderr, "BGA: SDL_CreateTexture failed (%dx%d)\n", videoTexW, videoTexH);
+        avcodec_free_context(&pCodecCtx); pCodecCtx = nullptr;
+        avformat_close_input(&pFormatCtx); pFormatCtx = nullptr;
+        return false;
+    }
+
+    // ★ SPSC スロット事前確保
+    // NV12 = Y(w×h) + UV(w×h/2) = w×h×3/2 バイト、ストライド = width (タイトパッキング)
+    size_t slotBytes = (size_t)videoTexW * videoTexH * 3 / 2;
+    for (int i = 0; i < NUM_SLOTS; i++) {
+        slots[i].data.assign(slotBytes, 0);
+        slots[i].pts = -1.0;
+    }
+    qHead.store(0, std::memory_order_relaxed);
+    qTail.store(0, std::memory_order_relaxed);
+
+    quitThread.store(false, std::memory_order_relaxed);
+    isVideoMode = true;
+    isReady.store(false, std::memory_order_release);
+
+    // デコードスレッド起動
+    decodeThread = std::thread(&BgaManager::videoWorker, this);
+    return true;
 }
 
-void BgaManager::loadBmp(int id, const std::string& fullPath, SDL_Renderer* renderer) {
-    if (textures.count(id)) return;
-    SDL_Surface* surf = IMG_Load(fullPath.c_str());
-    if (!surf) return;
+// ============================================================
+//  videoWorker — SPSC Producer、コア2固定 (Switch)
+// ============================================================
 
-    // ★修正：テクスチャ生成と同時にサイズを BgaTextureEntry にキャッシュする。
-    // render() での毎フレーム SDL_QueryTexture を廃止するための前提。
-    BgaTextureEntry entry;
-    entry.w   = surf->w;
-    entry.h   = surf->h;
-    entry.tex = SDL_CreateTextureFromSurface(renderer, surf);
-    SDL_FreeSurface(surf);
+void BgaManager::videoWorker() {
+    // ★ Switch: このスレッド自身をコア2に移動する。
+    //    コア0 = Switch OS システム
+    //    コア1 = ゲームメインスレッド (音声・入力・描画)
+    //    コア2 = BGA デコード ← このスレッド
+    //    コア3 = 空き (オーディオドライバが使う場合あり)
+    //
+    //    svcSetThreadCoreMask の第1引数 -2 は "現在のスレッド" を示す擬似ハンドル。
+    //    libnx のバージョンによって CUR_THREAD_HANDLE という定数が使える場合もある。
+#ifdef __SWITCH__
+    svcSetThreadCoreMask(-2, 2, (1U << 2));
+#endif
 
-    if (entry.tex) textures[id] = entry;
+    const int    w           = videoTexW;
+    const int    h           = videoTexH;
+    const size_t ySize       = (size_t)w * h;
+    const size_t uvSize      = (size_t)w * (h / 2);
+    // フレーム間隔の半分をスリープ上限にすることで CPU の無駄食いを防ぐ
+    const int    halfFrameMs = (videoFps > 0.0)
+                                ? std::max(1, (int)(500.0 / videoFps))
+                                : 16;
+
+    // av_packet_alloc/free: FFmpeg 3.1以降の推奨API。av_init_packet は非推奨。
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) return;
+
+    while (!quitThread.load(std::memory_order_relaxed)) {
+
+        // --- キュー満杯チェック (mutex なし、acquire で tail を読む) ---
+        int tail     = qTail.load(std::memory_order_relaxed);
+        int nextTail = (tail + 1) % NUM_SLOTS;
+        if (nextTail == qHead.load(std::memory_order_acquire)) {
+            // キューが満杯 → フレーム間隔の半分だけ待機
+            std::this_thread::sleep_for(std::chrono::milliseconds(halfFrameMs));
+            continue;
+        }
+
+        // --- パケット読み込み ---
+        if (av_read_frame(pFormatCtx, packet) < 0) {
+            // EOF: BGA は1回再生で止まる (必要ならシークしてループもできる)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        if (packet->stream_index != videoStreamIdx) {
+            av_packet_unref(packet);
+            continue;
+        }
+
+        if (avcodec_send_packet(pCodecCtx, packet) < 0) {
+            av_packet_unref(packet);
+            continue;
+        }
+        av_packet_unref(packet);
+
+        // --- フレーム受信ループ (1パケットから複数フレームが出ることがある) ---
+        while (!quitThread.load(std::memory_order_relaxed)) {
+            int ret = avcodec_receive_frame(pCodecCtx, pFrame);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+            if (ret < 0) break;
+
+            // キュー再チェック (複数フレームデコード時に満杯になることがある)
+            tail     = qTail.load(std::memory_order_relaxed);
+            nextTail = (tail + 1) % NUM_SLOTS;
+            if (nextTail == qHead.load(std::memory_order_acquire)) {
+                // 満杯 → このフレームを捨てて次のパケットへ
+                break;
+            }
+
+            // --- PTS 計算 ---
+            int64_t pts = pFrame->best_effort_timestamp;
+            if (pts == AV_NOPTS_VALUE) pts = 0;
+            int64_t startTime = pFormatCtx->streams[videoStreamIdx]->start_time;
+            if (startTime != AV_NOPTS_VALUE) pts -= startTime;
+            double frameTime = pts * av_q2d(pFormatCtx->streams[videoStreamIdx]->time_base);
+
+            // --- NV12 変換 → slots[tail].data に直接書き込む ---
+            FrameSlot& slot = slots[tail];
+            slot.pts = frameTime;
+
+            uint8_t* dstY  = slot.data.data();
+            uint8_t* dstUV = dstY + ySize;
+
+            // Y 面コピー
+            // ストライドが width に一致する場合は単一 memcpy で最速処理
+            if (pFrame->linesize[0] == w) {
+                memcpy(dstY, pFrame->data[0], ySize);
+            } else {
+                for (int r = 0; r < h; r++)
+                    memcpy(dstY + r * w, pFrame->data[0] + r * pFrame->linesize[0], w);
+            }
+
+            // UV 面: YUV420P (planar U, V) → NV12 (interleaved UV) 変換
+            // pFrame->format == AV_PIX_FMT_NV12 の場合は data[1] がすでに UV interleaved
+            if (pFrame->format == AV_PIX_FMT_NV12) {
+                // デコーダがネイティブ NV12 を出力した場合 — コピーのみ
+                if (pFrame->linesize[1] == w) {
+                    memcpy(dstUV, pFrame->data[1], uvSize);
+                } else {
+                    for (int r = 0; r < h / 2; r++)
+                        memcpy(dstUV + r * w, pFrame->data[1] + r * pFrame->linesize[1], w);
+                }
+            } else {
+                // YUV420P → NV12: U/V をインターリーブ
+                // uint16_t で2バイト同時書き込みにより帯域を節約
+                if (pFrame->linesize[1] == w / 2 && pFrame->linesize[2] == w / 2) {
+                    // ストライド一致 → 内ループ展開なしで最速
+                    const uint8_t* sU   = pFrame->data[1];
+                    const uint8_t* sV   = pFrame->data[2];
+                    uint16_t*      dUV  = reinterpret_cast<uint16_t*>(dstUV);
+                    const size_t   n    = uvSize / 2; // UV ペア数
+                    for (size_t j = 0; j < n; j++)
+                        dUV[j] = (uint16_t)sU[j] | ((uint16_t)sV[j] << 8);
+                } else {
+                    for (int r = 0; r < h / 2; r++) {
+                        uint16_t*      dUV = reinterpret_cast<uint16_t*>(dstUV + r * w);
+                        const uint8_t* sU  = pFrame->data[1] + r * pFrame->linesize[1];
+                        const uint8_t* sV  = pFrame->data[2] + r * pFrame->linesize[2];
+                        for (int j = 0; j < w / 2; j++)
+                            dUV[j] = (uint16_t)sU[j] | ((uint16_t)sV[j] << 8);
+                    }
+                }
+            }
+
+            // ★ SPSC: tail を advance して Consumer に公開する
+            qTail.store(nextTail, std::memory_order_release);
+
+            // 最初の1フレームが書けたら準備完了フラグを立てる
+            if (!isReady.load(std::memory_order_relaxed))
+                isReady.store(true, std::memory_order_release);
+        }
+    }
+
+    av_packet_free(&packet);
 }
+
+// ============================================================
+//  syncTime
+// ============================================================
 
 void BgaManager::syncTime(double ms) {
     sharedVideoElapsed.store(ms / 1000.0, std::memory_order_release);
 }
 
-void BgaManager::videoWorker() {
-    AVPacket packet;
-
-    int w = pCodecCtx->width;
-    int h = pCodecCtx->height;
-    // ★修正: プール確保時と同じ値を使うことでスロット境界を一致させる
-    size_t nv12Size = poolSlotSize;
-
-    size_t writeIdx = 0;
-
-    while (!quitThread) {
-        bool isFull = false;
-        {
-            std::lock_guard<std::mutex> lock(frameMutex);
-            isFull = (frameQueue.size() >= MAX_FRAME_QUEUE);
-        }
-        if (isFull) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            continue;
-        }
-
-        // ★修正: データレース対策
-        // render() が現在このスロットを memcpy 中であれば書き込みをスキップして待機する。
-        // writeIdx が renderInUseSlot と一致する間は次のスロットを試みる。
-        size_t safeWriteIdx = writeIdx;
-        {
-            int safety = 0;
-            while (safeWriteIdx == renderInUseSlot.load(std::memory_order_acquire)) {
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
-                if (++safety > 500) break; // 100ms タイムアウト（デッドロック防止）
-            }
-        }
-
-        if (av_read_frame(pFormatCtx, &packet) >= 0) {
-            if (packet.stream_index == videoStreamIdx) {
-                if (avcodec_send_packet(pCodecCtx, &packet) >= 0) {
-                    while (avcodec_receive_frame(pCodecCtx, pFrame) == 0) {
-                        int64_t pts = pFrame->best_effort_timestamp;
-                        if (pts == AV_NOPTS_VALUE) pts = 0;
-                        int64_t startTime = pFormatCtx->streams[videoStreamIdx]->start_time;
-                        if (startTime != AV_NOPTS_VALUE) pts -= startTime;
-                        double frameTime = pts * av_q2d(pFormatCtx->streams[videoStreamIdx]->time_base);
-
-                        VideoFrame vFrame;
-                        vFrame.pts     = frameTime;
-                        vFrame.slotIdx = safeWriteIdx; // ★修正: スロット番号を記録
-
-                        uint8_t* dstBase = &this->memoryPoolV[safeWriteIdx * nv12Size];
-                        vFrame.yPtr = dstBase;
-
-                        // Y面コピー
-                        for (int i = 0; i < h; ++i) {
-                            memcpy(dstBase + i * w,
-                                   pFrame->data[0] + i * pFrame->linesize[0], w);
-                        }
-
-                        // UV面インターリーブ (NV12): uint16_t で2バイト同時書き込み
-                        uint8_t* dstUV = dstBase + (w * h);
-                        for (int i = 0; i < h / 2; ++i) {
-                            uint16_t* dUV16 = reinterpret_cast<uint16_t*>(dstUV + i * w);
-                            const uint8_t* sU = pFrame->data[1] + i * pFrame->linesize[1];
-                            const uint8_t* sV = pFrame->data[2] + i * pFrame->linesize[2];
-                            for (int j = 0; j < w / 2; ++j) {
-                                dUV16[j] = (uint16_t)sU[j] | ((uint16_t)sV[j] << 8);
-                            }
-                        }
-
-                        {
-                            std::lock_guard<std::mutex> lock(frameMutex);
-                            frameQueue.push_back(vFrame);
-                            if (!isReady.load(std::memory_order_relaxed) && frameQueue.size() >= 10) {
-                                isReady.store(true, std::memory_order_release);
-                            }
-                        }
-                        safeWriteIdx = (safeWriteIdx + 1) % MAX_FRAME_QUEUE;
-                        writeIdx     = safeWriteIdx; // 次ループの起点を更新
-                    }
-                }
-            }
-            av_packet_unref(&packet);
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    }
-}
+// ============================================================
+//  render — SPSC Consumer、mutex なしのホットパス
+// ============================================================
 
 void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, int y, double cur_ms) {
-    // ★修正③: デコードスレッドが十分なフレームを蓄積するまで描画をスキップ。
-    //          これにより loadBgaFile() がメインスレッドをブロックせずとも、
-    //          未初期化のフレームバッファへのアクセスを防ぐ。
+    // デコードスレッドが最初のフレームを書くまで描画スキップ
     if (isVideoMode && !isReady.load(std::memory_order_acquire)) return;
 
+    // --- BGA 表示位置の計算 (レーン幅から動的に求める) ---
     int sw = Config::SCRATCH_WIDTH;
     int lw = Config::LANE_WIDTH;
     int totalKeysWidth = 0;
-    for (int i = 1; i <= 7; i++) totalKeysWidth += (i % 2 != 0) ? (int)(lw * 1.4) : lw;
+    for (int i = 1; i <= 7; i++)
+        totalKeysWidth += (i % 2 != 0) ? (int)(lw * 1.4) : lw;
     int totalWidth = totalKeysWidth + sw;
-    int startX = (Config::PLAY_SIDE == 1) ? 50 : (Config::SCREEN_WIDTH - totalWidth - 50);
+    int startX = (Config::PLAY_SIDE == 1)
+        ? 50
+        : (Config::SCREEN_WIDTH - totalWidth - 50);
     int dynamicCenterX = (Config::PLAY_SIDE == 1)
-        ? (startX + totalWidth + (Config::SCREEN_WIDTH - (startX + totalWidth)) / 2)
+        ? (startX + totalWidth + (Config::SCREEN_WIDTH - startX - totalWidth) / 2)
         : (startX / 2);
 
-    int renderH = 512;
-    int renderW = 512;
-
-    // ★修正：SDL_QueryTexture を廃止。サイズはキャッシュ済みの値を参照する。
-    SDL_Texture* targetTex = nullptr;
+    // 描画サイズ: 高さ512に合わせてアスペクト比を保つ
+    int renderH = 512, renderW = 512;
     if (isVideoMode && videoTexture) {
-        targetTex = videoTexture;
-        if (videoTexH > 0) renderW = (int)(512.0f * ((float)videoTexW / (float)videoTexH));
+        if (videoTexH > 0) renderW = (int)(512.0f * (float)videoTexW / (float)videoTexH);
     } else if (lastDisplayedId != -1) {
         auto it = textures.find(lastDisplayedId);
-        if (it != textures.end() && it->second.tex) {
-            targetTex = it->second.tex;
-            if (it->second.h > 0)
-                renderW = (int)(512.0f * ((float)it->second.w / (float)it->second.h));
-        }
+        if (it != textures.end() && it->second.h > 0)
+            renderW = (int)(512.0f * (float)it->second.w / (float)it->second.h);
     }
 
-    SDL_Rect dst = { dynamicCenterX - (renderW / 2),
-                     (Config::SCREEN_HEIGHT / 2) - (renderH / 2), renderW, renderH };
+    SDL_Rect dst = { dynamicCenterX - renderW / 2,
+                     Config::SCREEN_HEIGHT / 2 - renderH / 2,
+                     renderW, renderH };
 
-    while (currentEventIndex < bgaEvents.size() && bgaEvents[currentEventIndex].y <= currentPulse) {
-        lastDisplayedId = bgaEvents[currentEventIndex].id;
-        currentEventIndex++;
+    // --- BGA イベントインデックス更新 ---
+    while (currentEventIndex < bgaEvents.size()
+           && bgaEvents[currentEventIndex].y <= currentPulse) {
+        lastDisplayedId = bgaEvents[currentEventIndex++].id;
     }
-    while (currentLayerIndex < layerEvents.size() && layerEvents[currentLayerIndex].y <= currentPulse) {
-        lastLayerId = layerEvents[currentLayerIndex].id;
-        currentLayerIndex++;
+    while (currentLayerIndex < layerEvents.size()
+           && layerEvents[currentLayerIndex].y <= currentPulse) {
+        lastLayerId = layerEvents[currentLayerIndex++].id;
     }
-    while (currentPoorIndex < poorEvents.size() && poorEvents[currentPoorIndex].y <= currentPulse) {
-        lastPoorId = poorEvents[currentPoorIndex].id;
-        currentPoorIndex++;
+    while (currentPoorIndex < poorEvents.size()
+           && poorEvents[currentPoorIndex].y <= currentPulse) {
+        lastPoorId = poorEvents[currentPoorIndex++].id;
     }
 
+    // --- ビデオフレームアップロード (ロックフリー) ---
     if (isVideoMode && videoTexture) {
         double currentTime = sharedVideoElapsed.load(std::memory_order_acquire);
 
-        // ロック範囲をポインタ取得までに縮小し、memcpyはロック外で実行する。
-        // memoryPoolV は固定リングバッファ(30スロット)のため、
-        // pop済みスロットがデコードスレッドに再利用されるまでに
-        // 最大30フレーム分のサイクルが必要 → memcpy中(数十μs)に
-        // 上書きが追いつくことはなく、データ競合は発生しない。
-        uint8_t* frameDataPtr = nullptr;
-        size_t   frameSlotIdx = SIZE_MAX;
-        {
-            std::lock_guard<std::mutex> lock(frameMutex);
-            while (!frameQueue.empty()) {
-                VideoFrame& front = frameQueue.front();
-                if (frameQueue.size() >= 2 && frameQueue[1].pts <= currentTime) {
-                    frameQueue.pop_front();
-                    continue;
-                }
-                if (front.pts <= currentTime + 0.05) {
-                    frameDataPtr = front.yPtr;
-                    frameSlotIdx = front.slotIdx;
-                    frameQueue.pop_front();
-                }
-                break;
+        // ★ SPSC Consumer:
+        //    [head, tail) の範囲にある "pts <= currentTime" のフレームのうち
+        //    最も新しいもの (= tail に一番近いもの) を探して表示する。
+        //    それより古いフレームは head を advance することでスロットを解放し、
+        //    Worker が再利用できるようにする。
+        //
+        //    PTS は単調増加なので、head から scan して pts > currentTime になったら即 break。
+        //    最後に見つかった bestIdx が今表示すべきフレーム。
+
+        int head    = qHead.load(std::memory_order_relaxed);
+        int tail    = qTail.load(std::memory_order_acquire);
+        int bestIdx = -1;
+        int scanIdx = head;
+
+        while (scanIdx != tail) {
+            if (slots[scanIdx].pts <= currentTime + 0.001) { // 浮動小数点誤差を微量許容
+                bestIdx = scanIdx;
+                scanIdx = (scanIdx + 1) % NUM_SLOTS;
+            } else {
+                break; // PTS は単調増加 → 以降は必ず未来フレーム
             }
         }
 
-        if (frameDataPtr) {
-            // ★修正: memcpy 開始前にスロット番号を通知し、worker が上書きしないようにする
-            renderInUseSlot.store(frameSlotIdx, std::memory_order_release);
+        if (bestIdx >= 0) {
+            // bestIdx のデータを SDL テクスチャへアップロードしてから head を advance する。
+            // 順序が逆だと Worker がまだ読み中のスロットを上書きするリスクがある。
+            const uint8_t* src    = slots[bestIdx].data.data();
+            const size_t   yBytes = (size_t)videoTexW * videoTexH;
+            const size_t   uvBytes = yBytes / 2;
 
-            void* pixels;
-            int   pitch;
+            void* pixels; int pitch;
             if (SDL_LockTexture(videoTexture, NULL, &pixels, &pitch) == 0) {
-                uint8_t* dst = (uint8_t*)pixels;
-                const uint8_t* src = frameDataPtr;
-                for (int row = 0; row < videoTexH; ++row)
-                    memcpy(dst + row * pitch, src + row * videoTexW, videoTexW);
-                uint8_t* dstUV = dst + pitch * videoTexH;
-                const uint8_t* srcUV = src + videoTexW * videoTexH;
-                for (int row = 0; row < videoTexH / 2; ++row)
-                    memcpy(dstUV + row * pitch, srcUV + row * videoTexW, videoTexW);
+                uint8_t* yDst  = (uint8_t*)pixels;
+                uint8_t* uvDst = yDst + (ptrdiff_t)pitch * videoTexH;
+
+                if (pitch == videoTexW) {
+                    // ★ ストライド一致 → Y / UV それぞれ1回の memcpy で完了
+                    //    行ごとループを廃止することで Switch の NEON 最適化が効きやすくなる
+                    memcpy(yDst,  src,          yBytes);
+                    memcpy(uvDst, src + yBytes, uvBytes);
+                } else {
+                    // ストライド不一致 (まれ) → 行ごとコピー
+                    for (int r = 0; r < videoTexH; r++)
+                        memcpy(yDst + (ptrdiff_t)r * pitch, src + r * videoTexW, videoTexW);
+                    const uint8_t* uvSrc = src + yBytes;
+                    for (int r = 0; r < videoTexH / 2; r++)
+                        memcpy(uvDst + (ptrdiff_t)r * pitch, uvSrc + r * videoTexW, videoTexW);
+                }
                 SDL_UnlockTexture(videoTexture);
             }
 
-            // ★修正: memcpy 完了後にスロット解放を通知
-            renderInUseSlot.store(SIZE_MAX, std::memory_order_release);
+            // アップロード完了後に head を advance → Worker がスロットを再利用できる
+            qHead.store((bestIdx + 1) % NUM_SLOTS, std::memory_order_release);
         }
+
         SDL_RenderCopy(renderer, videoTexture, NULL, &dst);
+
     } else {
+        // BMP/PNG モード
         if (lastDisplayedId != -1) {
             auto it = textures.find(lastDisplayedId);
             if (it != textures.end() && it->second.tex)
@@ -327,12 +436,12 @@ void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, i
         }
     }
 
+    // レイヤー・ミス画像
     if (lastLayerId != -1) {
         auto it = textures.find(lastLayerId);
         if (it != textures.end() && it->second.tex)
             SDL_RenderCopy(renderer, it->second.tex, NULL, &dst);
     }
-
     if (showPoor && lastPoorId != -1) {
         auto it = textures.find(lastPoorId);
         if (it != textures.end() && it->second.tex)
@@ -340,39 +449,43 @@ void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, i
     }
 }
 
+// ============================================================
+//  clear / cleanup
+// ============================================================
+
 void BgaManager::clear() {
-    quitThread = true;
+    // ① デコードスレッドを停止する
+    quitThread.store(true, std::memory_order_release);
     if (decodeThread.joinable()) decodeThread.join();
 
-    for (auto& pair : textures) {
-        if (pair.second.tex) SDL_DestroyTexture(pair.second.tex);
-    }
+    // ② テクスチャ解放
+    for (auto& pair : textures) if (pair.second.tex) SDL_DestroyTexture(pair.second.tex);
     textures.clear();
-
     if (videoTexture) { SDL_DestroyTexture(videoTexture); videoTexture = nullptr; }
     videoTexW = 0; videoTexH = 0;
 
-    if (pFrame)    { av_frame_free(&pFrame);            pFrame    = nullptr; }
-    if (pCodecCtx) { avcodec_free_context(&pCodecCtx); pCodecCtx = nullptr; }
-    if (pFormatCtx){ avformat_close_input(&pFormatCtx); pFormatCtx = nullptr; }
+    // ③ FFmpeg コンテキスト解放
+    if (pFrame)     { av_frame_free(&pFrame);            pFrame     = nullptr; }
+    if (pCodecCtx)  { avcodec_free_context(&pCodecCtx); pCodecCtx  = nullptr; }
+    if (pFormatCtx) { avformat_close_input(&pFormatCtx); pFormatCtx = nullptr; }
 
-    isVideoMode          = false;
-    hasNewFrameToUpload  = false;
+    // ④ SPSC スロット解放 (shrink_to_fit でメモリを OS に返す)
+    for (int i = 0; i < NUM_SLOTS; i++) {
+        slots[i].data.clear();
+        slots[i].data.shrink_to_fit();
+        slots[i].pts = -1.0;
+    }
+    qHead.store(0, std::memory_order_relaxed);
+    qTail.store(0, std::memory_order_relaxed);
+
+    // ⑤ 状態リセット
+    isVideoMode = false;
     isReady.store(false, std::memory_order_release);
-    renderInUseSlot.store(SIZE_MAX, std::memory_order_release); // ★修正: スロット保護をリセット
-    frameQueue.clear();
-    memoryPoolV.clear();
-    memoryPoolV.shrink_to_fit(); // ★修正: 実際にメモリを解放する（次の loadBgaFile で再確保）
-    poolSlotSize = 0;
+    quitThread.store(false, std::memory_order_relaxed);
+    videoFps = 30.0;
+
     currentEventIndex = 0; currentLayerIndex = 0; currentPoorIndex = 0;
     lastDisplayedId   = -1; lastLayerId = -1; lastPoorId = -1;
 }
 
 void BgaManager::cleanup() { clear(); }
-
-
-
-
-
-
-

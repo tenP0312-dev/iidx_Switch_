@@ -79,11 +79,11 @@ public:
                    int x, int y, int w, int h, int alpha = 255);
 
     void renderNote(SDL_Renderer* ren, const PlayableNote& note,
-                    double cur_ms, double speed, bool isAuto = false);
+                  int64_t cur_y, double pixels_per_y, bool isAuto = false);
 
     void renderBackground(SDL_Renderer* ren);
     void renderLanes(SDL_Renderer* ren, double progress, int scratchStatus = 0);
-    void renderBeatLine(SDL_Renderer* ren, double diff, double speed);
+    void renderBeatLine(SDL_Renderer* ren, double diff_y, double pixels_per_y);
     void renderHitEffect(SDL_Renderer* ren, int lane, float progress);
     void renderBomb(SDL_Renderer* ren, int lane, int frame);
 

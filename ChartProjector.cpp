@@ -39,5 +39,17 @@ double ChartProjector::getBpmFromMs(double cur_ms) const {
     return current_bpm;
 }
 
+// 【追加】既存の getMsFromY を利用して全データに時間情報を付与する
+void ChartProjector::calculateAllTimestamps() {
+    if (!bmsData) return;
 
+    for (auto& channel : bmsData->sound_channels) {
+        for (auto& note : channel.notes) {
+            note.hit_ms = getMsFromY(note.y);
+        }
+    }
 
+    for (auto& line : bmsData->lines) {
+        line.hit_ms = getMsFromY(line.y);
+    }
+}

@@ -6,7 +6,11 @@
 
 class ChartProjector {
 public:
-    void init(const BMSData& data) { bmsData = &data; }
+    // データを事前計算（書き込み）するため非const参照に変更
+    void init(BMSData& data) { 
+        bmsData = &data; 
+        calculateAllTimestamps();
+    }
 
     double getMsFromY(int64_t target_y) const;
     int64_t getYFromMs(double cur_ms) const;
@@ -17,10 +21,8 @@ public:
     }
 
 private:
-    const BMSData* bmsData = nullptr;
+    void calculateAllTimestamps(); // 【追加】初期化時に全要素のmsを計算する
+    BMSData* bmsData = nullptr;    // 非constに変更
 };
 
 #endif
-
-
-

@@ -17,7 +17,7 @@ int calculateHSRecoveryInternal(int notes) {
     }
 }
 
-void PlayEngine::init(const BMSData& data) {
+void PlayEngine::init(BMSData& data) {
     // ★修正④: bmsData = data を削除。data は ScenePlay::run() で生存し続けるため、
     //          参照を渡すだけで安全。sound_channels (数千ノーツ分) の二重確保を回避。
     projector.init(data);

@@ -469,29 +469,34 @@ void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngin
     SDL_SetRenderDrawColor(ren, 10, 10, 15, 255);
     SDL_RenderClear(ren);
     renderer.renderBackground(ren);
-    int bgaX = (Config::PLAY_SIDE == 1) ? 600 : 40; 
-    int bgaY = 40; 
+    int bgaX = (Config::PLAY_SIDE == 1) ? 600 : 40;
+    int bgaY = 40;
     double currentBpm = engine.getBpmFromMs(cur_ms);
     renderer.renderUI(ren, header, fps, currentBpm, engine.getStatus().exScore);
     bga.render(cur_y, ren, bgaX, bgaY, cur_ms);
     renderer.renderLanes(ren, progress,
         scratchUpActive ? 1 : (scratchDownActive ? 2 : 0));
-    
-    double visual_speed = (Config::HIGH_SPEED * currentBpm) / 475.0; 
-    double max_visible_ms = (double)Config::VISIBLE_PX / std::max(0.01, visual_speed) + 200.0;
-    double y_per_ms = (currentBpm * header.resolution) / 60000.0;
 
-    // 小節線の描画最適化（本来はここもインデックス管理すべきだが、数が少ないため現状維持）
+    // pixels_per_y: 1Yユニットあたりのピクセル数（BPM非依存の定数）
+    // ハイスピード・画面サイズで決まる唯一の定数。これを軸に全描画が決まる。
+    // 475 は基準値（旧コードからの継承）、60000/res は 1Yユニット = 何ms か
+    double pixels_per_y = (Config::HIGH_SPEED * 60000.0) / (475.0 * header.resolution);
+
+    // 可視範囲をYユニットで計算
+    double max_visible_y = (double)Config::VISIBLE_PX / std::max(1e-9, pixels_per_y) + 1000.0;
+
+    // 小節線描画
     for (const auto& bl : engine.getBeatLines()) {
-        double y_diff_ms = (double)(bl.y - cur_y) / y_per_ms;
-        if (y_diff_ms > -500.0 && y_diff_ms < max_visible_ms) renderer.renderBeatLine(ren, y_diff_ms, visual_speed);
+        double diff_y = (double)(bl.y - cur_y);
+        if (diff_y > -2000.0 && diff_y < max_visible_y) {
+            renderer.renderBeatLine(ren, diff_y, pixels_per_y);
+        }
     }
 
-    // エフェクト・ボム描画 (既存ロジック100%継承)
     effects.erase(std::remove_if(effects.begin(), effects.end(), [&](auto& eff) {
-        if (eff.lane >= 1 && eff.lane <= 7 && lanePressed[eff.lane]) eff.startTime = now; 
+        if (eff.lane >= 1 && eff.lane <= 7 && lanePressed[eff.lane]) eff.startTime = now;
         float duration = (eff.lane == 8) ? 200.0f : 100.0f;
-        float p = (float)(now - eff.startTime) / duration; 
+        float p = (float)(now - eff.startTime) / duration;
         if (p >= 1.0f) return true;
         renderer.renderHitEffect(ren, eff.lane, p);
         return false;
@@ -504,37 +509,31 @@ void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngin
         return false;
     }), bombAnims.end());
 
-    // --- 【劇的改善】ノーツ描画のスライディング・ウィンドウ ---
+    // --- ノーツ描画（スライディング・ウィンドウ）---
     const auto& allNotes = engine.getNotes();
-    
-    // 1. 画面下端よりも遥か後ろに消えたノーツまで開始位置を進める
-    while (drawStartIndex < allNotes.size() && allNotes[drawStartIndex].target_ms < cur_ms - 1000.0) {
+
+    while (drawStartIndex < allNotes.size()
+           && allNotes[drawStartIndex].target_ms < cur_ms - 1000.0
+           && !allNotes[drawStartIndex].isBeingPressed) {
         drawStartIndex++;
     }
 
-    // 2. 開始位置から描画ループ
     for (size_t i = drawStartIndex; i < allNotes.size(); ++i) {
-        const auto& n = allNotes[i]; // ★重要：コピーせず参照で受ける
+        const auto& n = allNotes[i];
 
-        // 3. 画面上端（可視範囲）を超えたら即終了 (O(N) -> O(画面内ノーツ数))
-        double y_diff_ms = (double)(n.y - cur_y) / y_per_ms;
-        if (y_diff_ms > max_visible_ms) break; 
+        // Y座標ベースで可視範囲チェック
+        double y_diff = (double)(n.y - cur_y);
+        if (!n.isBeingPressed && y_diff > max_visible_y) break;
 
         if ((!n.played || n.isBeingPressed) && !n.isBGM) {
-            double end_y_diff_ms = y_diff_ms;
-            if (n.isLN) end_y_diff_ms += n.duration_ms; 
-            
-            if (end_y_diff_ms > -500.0) {
-                // PlayableNote の一時オブジェクト作成を回避し、const参照のまま渡す
-                // (NoteRenderer::renderNote も const PlayableNote& 受けに修正されている前提)
-                renderer.renderNote(ren, n, cur_ms, visual_speed, isAutoLane(n.lane));
+            // LN終点のY差分でカリング判定
+            double end_y_diff = n.isLN ? (double)(n.y + n.l - cur_y) : y_diff;
+            if (end_y_diff > -5000.0) {
+                renderer.renderNote(ren, n, cur_y, pixels_per_y, isAutoLane(n.lane));
             }
         }
     }
 
-    // --- (以下、コンボ・判定・ゲージ等の描画ロジック 100%継承) ---
-    // ★修正⑥: NoteRenderer::ll にキャッシュ済みの値をゲッター経由で取得。
-    //          rebuildLaneLayout() と二箇所で同じ計算をして乖離するバグの芽を摘む。
     int laneCenterX = renderer.getLaneCenterX();
 
     auto& judge = engine.getCurrentJudge();
