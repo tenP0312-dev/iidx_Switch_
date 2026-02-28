@@ -29,7 +29,7 @@ struct BMSHeader {
     std::string title, artist, genre;
     std::string modeHint; // bmsonの "mode_hint" (beat-7k, beat-14k等)
     double bpm;
-    int resolution;
+    int resolution = 480;
 
     // --- 既存ロジック・ビルド互換性維持のための変数 ---
     double min_bpm;   // 最小BPM
@@ -69,3 +69,6 @@ public:
 };
 
 #endif
+
+
+

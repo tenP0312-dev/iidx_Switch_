@@ -65,3 +65,6 @@ ModeSelectStep SceneModeSelect::update(SDL_Renderer* ren, NoteRenderer& renderer
     SDL_RenderPresent(ren);
     return ModeSelectStep::SELECTING;
 }
+
+
+

@@ -334,3 +334,6 @@ void SceneSelectView::renderExitDialog(SDL_Renderer* ren, NoteRenderer& renderer
     renderer.drawText(ren, "SCRATCH: SELECT YES/NO | LEVEL BUTTON: BACK TO MODE SELECT", 640, 540, {200,200,200,255}, false, true, false, "");
     renderer.drawText(ren, "PRESS DECIDE KEY TO CONFIRM", 640, 580, {255,255,255,255}, false, true, false, "");
 }
+
+
+

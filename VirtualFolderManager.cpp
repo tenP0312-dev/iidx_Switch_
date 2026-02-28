@@ -272,3 +272,6 @@ std::vector<SongGroup> VirtualFolderManager::createAlphaFolders(const std::vecto
 
     return groups;
 }
+
+
+

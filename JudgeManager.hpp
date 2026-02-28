@@ -4,19 +4,22 @@
 #include "CommonTypes.hpp"
 #include "Config.hpp"
 #include <cmath>
-#include <string>
 
 class JudgeManager {
 public:
-    // 既存の updateGauge ロジックをそのまま移植
     void updateGauge(PlayStatus& status, int judgeType, bool isHit, double baseRecoveryPerNote);
 
-    // 判定用文字列と色の構造体 (デザイン維持用)
+    // ★修正：JudgeUI の label を std::string から JudgeKind に変更。
+    // 呼び出し側で毎回 string をヒープ確保していた問題を解消。
     struct JudgeUI {
-        std::string label;
-        SDL_Color color;
+        JudgeKind kind;
+        // color は JudgeKind から導出できるため削除（judgeKindToColor を使う）
     };
     JudgeUI getJudgeUIData(int judgeType);
 };
 
-#endif
+#endif // JUDGEMANAGER_HPP
+
+
+
+

@@ -6,19 +6,17 @@
 #include <cstring>
 #include <thread>
 
-// --- 定数の定義 ---
 static const long long BMP_LOOK_AHEAD = 300000;
 
 void BgaManager::init(size_t expectedSize) {
     clear();
     textures.reserve(std::min((size_t)256, expectedSize));
 
-    // 批評家指摘 A: スレッドが動く前にメモリプールを確定させる
-    // 1280x720 (NV12) * 5フレーム分を一括確保し、スレッド内での再確保（断片化）を物理的に防ぐ
-    int max_w = 1280; 
+    // 1280x720 NV12 * MAX_FRAME_QUEUE フレーム分を一括確保
+    int max_w = 1280;
     int max_h = 720;
-    size_t nv12Size = (max_w * max_h) + (max_w * max_h / 2);
-    this->memoryPoolV.assign(nv12Size * MAX_FRAME_QUEUE, 0); 
+    size_t nv12Size = (size_t)(max_w * max_h) + (size_t)(max_w * max_h / 2);
+    this->memoryPoolV.assign(nv12Size * MAX_FRAME_QUEUE, 0);
 }
 
 bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
@@ -55,39 +53,46 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
 
     pCodecCtx = avcodec_alloc_context3(pCodec);
     avcodec_parameters_to_context(pCodecCtx, pCodecPar);
-    pCodecCtx->thread_count = 2;
-    pCodecCtx->flags2 |= AV_CODEC_FLAG2_FAST;
+    pCodecCtx->thread_count   = 2;
+    pCodecCtx->flags2         |= AV_CODEC_FLAG2_FAST;
     pCodecCtx->workaround_bugs = 1;
 
     if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0) return false;
 
     pFrame = av_frame_alloc();
 
-    videoTexture = SDL_CreateTexture(renderer, 
-                                     SDL_PIXELFORMAT_NV12, 
-                                     SDL_TEXTUREACCESS_STREAMING, 
-                                     pCodecCtx->width, 
+    videoTexture = SDL_CreateTexture(renderer,
+                                     SDL_PIXELFORMAT_NV12,
+                                     SDL_TEXTUREACCESS_STREAMING,
+                                     pCodecCtx->width,
                                      pCodecCtx->height);
-    
+
     if (!videoTexture) {
-        fprintf(stderr, "CRITICAL: Failed to create video texture. Memory fragmentation?\n");
-        return false; 
+        fprintf(stderr, "CRITICAL: Failed to create video texture.\n");
+        return false;
     }
+
+    // ★修正：動画テクスチャのサイズを生成時に一度だけ記録する
+    videoTexW = pCodecCtx->width;
+    videoTexH = pCodecCtx->height;
 
     quitThread = false;
     isVideoMode = true;
     {
         std::lock_guard<std::mutex> lock(frameMutex);
-        frameQueue.clear(); 
+        frameQueue.clear();
     }
     hasNewFrameToUpload = false;
     decodeThread = std::thread(&BgaManager::videoWorker, this);
 
-    // ★修正：批評家指摘 2：動画モードでない、または失敗時は待機せず即座に抜ける
-    // さらに、キューが一定数貯まれば即座に開始し、無駄な sleep を排除する
-    int waitCount = 0;
-    while (waitCount < 200) {
-        // 万が一スレッドが異常終了した場合は待機を打ち切る
+    // ★修正：ビジーウェイトを改善。
+    // 最大 2 秒間待つ旧実装から、キューが充填されるか上限時間に達したら抜ける実装に変更。
+    // ただしメインスレッドの長期ブロックは依然として問題があるため、
+    // 将来的にはコールバック or フラグ確認方式に移行すること。
+    const int MAX_WAIT_MS  = 1000; // 最大1秒に短縮
+    const int MIN_FRAMES   = 10;   // 最低限このフレーム数を待てば再生開始
+    int waitedMs = 0;
+    while (waitedMs < MAX_WAIT_MS) {
         if (quitThread) break;
 
         size_t currentSize = 0;
@@ -95,19 +100,17 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
             std::lock_guard<std::mutex> lock(frameMutex);
             currentSize = frameQueue.size();
         }
-        
-        // キューがある程度（15フレーム程度）溜まれば再生開始して良い（2秒待つ必要はない）
-        if (currentSize >= 15) break; 
-        
+        if (currentSize >= (size_t)MIN_FRAMES) break;
+
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        waitCount++;
+        waitedMs += 10;
     }
 
     return true;
 }
 
 void BgaManager::preLoad(long long startPulse, SDL_Renderer* renderer) {
-    if (isVideoMode) return; 
+    if (isVideoMode) return;
     int nextNeededId = -1;
     auto scan = [&](const std::vector<BgaEvent>& events) {
         for (const auto& ev : events) {
@@ -129,9 +132,16 @@ void BgaManager::loadBmp(int id, const std::string& fullPath, SDL_Renderer* rend
     if (textures.count(id)) return;
     SDL_Surface* surf = IMG_Load(fullPath.c_str());
     if (!surf) return;
-    SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+
+    // ★修正：テクスチャ生成と同時にサイズを BgaTextureEntry にキャッシュする。
+    // render() での毎フレーム SDL_QueryTexture を廃止するための前提。
+    BgaTextureEntry entry;
+    entry.w   = surf->w;
+    entry.h   = surf->h;
+    entry.tex = SDL_CreateTextureFromSurface(renderer, surf);
     SDL_FreeSurface(surf);
-    if (tex) textures[id] = tex;
+
+    if (entry.tex) textures[id] = entry;
 }
 
 void BgaManager::syncTime(double ms) {
@@ -140,16 +150,11 @@ void BgaManager::syncTime(double ms) {
 
 void BgaManager::videoWorker() {
     AVPacket packet;
-    
+
     int w = pCodecCtx->width;
     int h = pCodecCtx->height;
-    size_t nv12Size = (w * h) + (w * h / 2); 
-    
-    // ★修正：批評家指摘 ②：スレッド内での assign (new/delete発生) を廃止。
-    // すでに init で確保済みの領域を使うため、ここでは何もしない。
-    // (確保済みサイズが足りない場合のみ resize する安全策を入れる場合もありますが、
-    //  既存ロジック100%継承のため、ここでは init を信頼します)
-    
+    size_t nv12Size = (size_t)(w * h) + (size_t)(w * h / 2);
+
     size_t writeIdx = 0;
 
     while (!quitThread) {
@@ -174,26 +179,28 @@ void BgaManager::videoWorker() {
                         double frameTime = pts * av_q2d(pFormatCtx->streams[videoStreamIdx]->time_base);
 
                         VideoFrame vFrame;
-                        vFrame.pts = frameTime;
-                        
-                        // memoryPoolV 内の固定位置を割り当てるだけ。メモリ確保は発生しない。
-                        uint8_t* dstBase = &this->memoryPoolV[writeIdx * nv12Size];
-                        vFrame.yPtr = dstBase; 
+                        vFrame.pts  = frameTime;
 
-                        // 1. Y面のコピー
+                        uint8_t* dstBase = &this->memoryPoolV[writeIdx * nv12Size];
+                        vFrame.yPtr = dstBase;
+
+                        // Y面コピー
                         for (int i = 0; i < h; ++i) {
-                            memcpy(dstBase + i * w, pFrame->data[0] + i * pFrame->linesize[0], w);
+                            memcpy(dstBase + i * w,
+                                   pFrame->data[0] + i * pFrame->linesize[0], w);
                         }
 
-                        // 2. UV面のインターリーブ (NV12)
+                        // ★修正：UV面インターリーブを uint16_t で 2 バイト同時書き込みに変更。
+                        // 旧実装は 1 バイトずつ書いていたため、720p なら約 23 万回のバイト書き込みが発生。
+                        // uint16_t でまとめることでメモリアクセス回数を半減させ、キャッシュ効率を改善。
                         uint8_t* dstUV = dstBase + (w * h);
                         for (int i = 0; i < h / 2; ++i) {
-                            uint8_t* dUV = dstUV + i * w;
-                            uint8_t* sU = pFrame->data[1] + i * pFrame->linesize[1];
-                            uint8_t* sV = pFrame->data[2] + i * pFrame->linesize[2];
+                            uint16_t* dUV16 = reinterpret_cast<uint16_t*>(dstUV + i * w);
+                            const uint8_t* sU = pFrame->data[1] + i * pFrame->linesize[1];
+                            const uint8_t* sV = pFrame->data[2] + i * pFrame->linesize[2];
                             for (int j = 0; j < w / 2; ++j) {
-                                dUV[j * 2]     = sU[j];
-                                dUV[j * 2 + 1] = sV[j];
+                                // Little-endian: 下位バイト=U, 上位バイト=V
+                                dUV16[j] = (uint16_t)sU[j] | ((uint16_t)sV[j] << 8);
                             }
                         }
 
@@ -217,26 +224,31 @@ void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, i
     int lw = Config::LANE_WIDTH;
     int totalKeysWidth = 0;
     for (int i = 1; i <= 7; i++) totalKeysWidth += (i % 2 != 0) ? (int)(lw * 1.4) : lw;
-    int totalWidth = totalKeysWidth + sw; 
+    int totalWidth = totalKeysWidth + sw;
     int startX = (Config::PLAY_SIDE == 1) ? 50 : (Config::SCREEN_WIDTH - totalWidth - 50);
-    int dynamicCenterX = (Config::PLAY_SIDE == 1) ? (startX + totalWidth + (Config::SCREEN_WIDTH - (startX + totalWidth)) / 2) : (startX / 2);
-    
+    int dynamicCenterX = (Config::PLAY_SIDE == 1)
+        ? (startX + totalWidth + (Config::SCREEN_WIDTH - (startX + totalWidth)) / 2)
+        : (startX / 2);
+
     int renderH = 512;
     int renderW = 512;
-    
-    SDL_Texture* targetTex = nullptr;
-    if (isVideoMode && videoTexture) targetTex = videoTexture;
-    else if (lastDisplayedId != -1 && textures.count(lastDisplayedId)) targetTex = textures[lastDisplayedId];
 
-    // ※ SDL_QueryTextureの頻出は批評で指摘されていますが、
-    // ここではロジック継承のため維持しつつ、videoTexture更新後にのみ影響するよう最小化
-    if (targetTex) {
-        int texW, texH;
-        SDL_QueryTexture(targetTex, NULL, NULL, &texW, &texH);
-        if (texH > 0) renderW = (int)(512.0f * ((float)texW / (float)texH));
+    // ★修正：SDL_QueryTexture を廃止。サイズはキャッシュ済みの値を参照する。
+    SDL_Texture* targetTex = nullptr;
+    if (isVideoMode && videoTexture) {
+        targetTex = videoTexture;
+        if (videoTexH > 0) renderW = (int)(512.0f * ((float)videoTexW / (float)videoTexH));
+    } else if (lastDisplayedId != -1) {
+        auto it = textures.find(lastDisplayedId);
+        if (it != textures.end() && it->second.tex) {
+            targetTex = it->second.tex;
+            if (it->second.h > 0)
+                renderW = (int)(512.0f * ((float)it->second.w / (float)it->second.h));
+        }
     }
-    
-    SDL_Rect dst = { dynamicCenterX - (renderW / 2), (Config::SCREEN_HEIGHT / 2) - (renderH / 2), renderW, renderH };
+
+    SDL_Rect dst = { dynamicCenterX - (renderW / 2),
+                     (Config::SCREEN_HEIGHT / 2) - (renderH / 2), renderW, renderH };
 
     while (currentEventIndex < bgaEvents.size() && bgaEvents[currentEventIndex].y <= currentPulse) {
         lastDisplayedId = bgaEvents[currentEventIndex].id;
@@ -253,7 +265,13 @@ void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, i
 
     if (isVideoMode && videoTexture) {
         double currentTime = sharedVideoElapsed.load(std::memory_order_acquire);
-        
+
+        // ロック範囲をポインタ取得までに縮小し、memcpyはロック外で実行する。
+        // memoryPoolV は固定リングバッファ(30スロット)のため、
+        // pop済みスロットがデコードスレッドに再利用されるまでに
+        // 最大30フレーム分のサイクルが必要 → memcpy中(数十μs)に
+        // 上書きが追いつくことはなく、データ競合は発生しない。
+        uint8_t* frameDataPtr = nullptr;
         {
             std::lock_guard<std::mutex> lock(frameMutex);
             while (!frameQueue.empty()) {
@@ -262,49 +280,71 @@ void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, i
                     frameQueue.pop_front();
                     continue;
                 }
-                
                 if (front.pts <= currentTime + 0.05) {
-                    void* pixels;
-                    int pitch;
-                    if (SDL_LockTexture(videoTexture, NULL, &pixels, &pitch) == 0) {
-                        // --- 【劇的改善】メインスレッドはmemcpy 1回で終了 ---
-                        // すでにworker側でNV12化されているため、ピクセルループは不要
-                        size_t totalSize = (pCodecCtx->width * pCodecCtx->height * 3) / 2;
-                        memcpy(pixels, front.yPtr, totalSize);
-                        
-                        SDL_UnlockTexture(videoTexture);
-                    }
-                    frameQueue.pop_front();
+                    frameDataPtr = front.yPtr; // ポインタだけ取得
+                    frameQueue.pop_front();    // ロック内でpop（所有権を手放す）
                 }
-                break; 
+                break;
+            }
+        } // ← ここでデコードスレッドのブロックが解除される
+
+        // memcpyはロック外で実行（デコードスレッドを止めない）
+        if (frameDataPtr) {
+            void* pixels;
+            int   pitch;
+            if (SDL_LockTexture(videoTexture, NULL, &pixels, &pitch) == 0) {
+                size_t totalSize = (size_t)(videoTexW * videoTexH * 3) / 2;
+                memcpy(pixels, frameDataPtr, totalSize);
+                SDL_UnlockTexture(videoTexture);
             }
         }
         SDL_RenderCopy(renderer, videoTexture, NULL, &dst);
     } else {
-        if (lastDisplayedId != -1 && textures.count(lastDisplayedId)) {
-            SDL_RenderCopy(renderer, textures[lastDisplayedId], NULL, &dst);
+        if (lastDisplayedId != -1) {
+            auto it = textures.find(lastDisplayedId);
+            if (it != textures.end() && it->second.tex)
+                SDL_RenderCopy(renderer, it->second.tex, NULL, &dst);
         }
     }
 
-    if (lastLayerId != -1 && textures.count(lastLayerId)) SDL_RenderCopy(renderer, textures[lastLayerId], NULL, &dst);
-    if (showPoor && lastPoorId != -1 && textures.count(lastPoorId)) SDL_RenderCopy(renderer, textures[lastPoorId], NULL, &dst);
+    if (lastLayerId != -1) {
+        auto it = textures.find(lastLayerId);
+        if (it != textures.end() && it->second.tex)
+            SDL_RenderCopy(renderer, it->second.tex, NULL, &dst);
+    }
+
+    if (showPoor && lastPoorId != -1) {
+        auto it = textures.find(lastPoorId);
+        if (it != textures.end() && it->second.tex)
+            SDL_RenderCopy(renderer, it->second.tex, NULL, &dst);
+    }
 }
 
 void BgaManager::clear() {
     quitThread = true;
     if (decodeThread.joinable()) decodeThread.join();
-    for (auto& pair : textures) if (pair.second) SDL_DestroyTexture(pair.second);
+
+    for (auto& pair : textures) {
+        if (pair.second.tex) SDL_DestroyTexture(pair.second.tex);
+    }
     textures.clear();
+
     if (videoTexture) { SDL_DestroyTexture(videoTexture); videoTexture = nullptr; }
-    if (pFrame) { av_frame_free(&pFrame); pFrame = nullptr; }
+    videoTexW = 0; videoTexH = 0;
+
+    if (pFrame)    { av_frame_free(&pFrame);            pFrame    = nullptr; }
     if (pCodecCtx) { avcodec_free_context(&pCodecCtx); pCodecCtx = nullptr; }
-    if (pFormatCtx) { avformat_close_input(&pFormatCtx); pFormatCtx = nullptr; }
-    
-    isVideoMode = false;
-    hasNewFrameToUpload = false;
+    if (pFormatCtx){ avformat_close_input(&pFormatCtx); pFormatCtx = nullptr; }
+
+    isVideoMode          = false;
+    hasNewFrameToUpload  = false;
     frameQueue.clear();
     currentEventIndex = 0; currentLayerIndex = 0; currentPoorIndex = 0;
-    lastDisplayedId = -1; lastLayerId = -1; lastPoorId = -1;
+    lastDisplayedId   = -1; lastLayerId = -1; lastPoorId = -1;
 }
 
 void BgaManager::cleanup() { clear(); }
+
+
+
+

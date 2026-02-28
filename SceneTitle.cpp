@@ -37,3 +37,6 @@ TitleStep SceneTitle::update(SDL_Renderer* ren, NoteRenderer& renderer) {
     SDL_RenderPresent(ren);
     return currentStep;
 }
+
+
+

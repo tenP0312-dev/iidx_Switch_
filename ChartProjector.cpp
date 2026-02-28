@@ -38,3 +38,6 @@ double ChartProjector::getBpmFromMs(double cur_ms) const {
     }
     return current_bpm;
 }
+
+
+

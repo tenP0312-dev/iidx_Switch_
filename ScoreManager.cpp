@@ -171,3 +171,6 @@ void ScoreManager::saveIfBest(const std::string& title, const std::string& chart
         scoreCache[uniqueId] = newBest;
     }
 }
+
+
+

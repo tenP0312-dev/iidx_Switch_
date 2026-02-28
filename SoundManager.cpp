@@ -8,18 +8,12 @@
 #include <cstring>
 #include <algorithm>
 
-/**
- * SDL_mixerの初期化とチャンネルの割り当て
- */
 void SoundManager::init() {
     sounds.reserve(4000);
     SDL_SetHint("SDL_AUDIO_RESAMPLING_MODE", "linear");
 
-    // バッファサイズを 1024 に設定
-    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 1024) < 0) {
+    if (Mix_OpenAudio(22050, MIX_DEFAULT_FORMAT, 1, 512) < 0) {
         std::cerr << "Mix_OpenAudio Error: " << Mix_GetError() << std::endl;
-        // フォールバック
-        Mix_OpenAudio(22050, MIX_DEFAULT_FORMAT, 1, 1024);
     }
 
     Mix_AllocateChannels(256);
@@ -32,11 +26,15 @@ void SoundManager::preloadBoxIndex(const std::string& rootPath, const std::strin
     while (true) {
         std::string suffix = (partIdx == 1) ? "" : std::to_string(partIdx);
         std::string pckPath = rootPath + (rootPath.empty() || rootPath.back() == '/' ? "" : "/") + bmsonName + suffix + ".boxwav";
-        
-        std::ifstream ifs(pckPath, std::ios::binary);
-        if (!ifs) {
-            break;
+
+        // Switch向け: パート2以降はI/O安定化のために待機
+        if (partIdx > 1) {
+            std::cout << "Part " << partIdx << " detected. Waiting for I/O settle..." << std::endl;
+            SDL_Delay(2500);
         }
+
+        std::ifstream ifs(pckPath, std::ios::binary);
+        if (!ifs) break;
 
         uint32_t count, d1, d2;
         if (!ifs.read((char*)&count, 4)) break;
@@ -64,8 +62,7 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
 
     if (boxIndex.count(filename)) {
         auto& entry = boxIndex[filename];
-        
-        // 修正ポイント：SDL_RWFromMem を使い、指定サイズ分のみをメモリに読み込む
+
         std::ifstream ifs(entry.pckPath, std::ios::binary);
         if (ifs) {
             uint8_t* tempBuf = (uint8_t*)SDL_malloc(entry.size);
@@ -73,18 +70,25 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
                 ifs.seekg(entry.offset);
                 ifs.read((char*)tempBuf, entry.size);
 
-                // freesrc=1 により、rw 自体は Mix_LoadWAV_RW 内で解放される
-                SDL_RWops* rw = SDL_RWFromMem(tempBuf, entry.size);
-                Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
-                
+                // ★修正：freesrc=0 にして RWops を手動解放する。
+                // freesrc=1 は SDL_RWops 構造体のみを解放し、SDL_RWFromMem が指す
+                // tempBuf の元メモリは解放しない。これがメモリリークの根本原因だった。
+                // Mix_LoadWAV_RW(PCM WAV) は内部でデータをコピーするため、
+                // SDL_RWclose 後に tempBuf を SDL_free しても安全。
+                SDL_RWops* rw = SDL_RWFromMem(tempBuf, (int)entry.size);
+                Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 0); // ← 0 に変更
+                SDL_RWclose(rw);                           // ← 手動で close
+
                 if (chunk) {
                     sounds[id] = chunk;
                     currentTotalMemory += entry.size;
-                    // 指摘：Mix_Chunkは内部でデータを所有するため、読み込み直後にバッファを解放可能
+                } else {
+                    // デバッグ用：ロード失敗の原因を出力
+                    // fprintf(stderr, "Mix_LoadWAV_RW failed for %s: %s\n", filename.c_str(), Mix_GetError());
                 }
-                SDL_free(tempBuf);
+                SDL_free(tempBuf); // chunk の成否に関わらず必ず解放
             }
-            return; 
+            return;
         }
     }
 
@@ -99,18 +103,21 @@ void SoundManager::loadSingleSound(const std::string& filename, const std::strin
         return;
     }
 
-    Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1); 
+    // 外部ファイルは Mix_LoadWAV_RW(freesrc=1) で問題なし。
+    // SDL_RWFromFile で開いた RWops は SDL が内部でファイルハンドルを持つため、
+    // freesrc=1 で正しく閉じられる。
+    Mix_Chunk* chunk = Mix_LoadWAV_RW(rw, 1);
     if (chunk) {
         sounds[id] = chunk;
         currentTotalMemory += fileSize;
     }
 }
 
-void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames, 
-                                    const std::string& rootPath, 
+void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
+                                    const std::string& rootPath,
                                     const std::string& bmsonName,
                                     std::function<void(int, const std::string&)> onProgress) {
-    
+
     std::unordered_map<std::string, std::vector<std::string>> groupPerBox;
     std::vector<std::string> externalFiles;
 
@@ -126,6 +133,7 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     int processedCount = 0;
 
     for (auto& [pckPath, list] : groupPerBox) {
+        // オフセット順にソートしてシーク回数を最小化
         std::sort(list.begin(), list.end(), [&](const std::string& a, const std::string& b) {
             return boxIndex[a].offset < boxIndex[b].offset;
         });
@@ -137,23 +145,25 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
             auto& entry = boxIndex[name];
             if (currentTotalMemory + entry.size > MAX_WAV_MEMORY) {
                 processedCount++;
+                if (onProgress) onProgress(processedCount, name);
                 continue;
             }
 
-            // 修正ポイント：一括読み込みでも RWFromMem 方式を採用し過剰確保を防止
             uint8_t* tempBuf = (uint8_t*)SDL_malloc(entry.size);
             if (tempBuf) {
                 ifs.seekg(entry.offset);
                 ifs.read((char*)tempBuf, entry.size);
 
-                SDL_RWops* rwIndiv = SDL_RWFromMem(tempBuf, entry.size);
-                Mix_Chunk* chunk = Mix_LoadWAV_RW(rwIndiv, 1);
-                
+                // ★修正：loadSingleSound と同様に freesrc=0 + 手動 RWclose
+                SDL_RWops* rwIndiv = SDL_RWFromMem(tempBuf, (int)entry.size);
+                Mix_Chunk* chunk = Mix_LoadWAV_RW(rwIndiv, 0); // ← 0 に変更
+                SDL_RWclose(rwIndiv);                           // ← 手動で close
+
                 if (chunk) {
                     sounds[getHash(name)] = chunk;
                     currentTotalMemory += entry.size;
                 }
-                SDL_free(tempBuf);
+                SDL_free(tempBuf); // chunk の成否に関わらず必ず解放
             }
 
             processedCount++;
@@ -168,7 +178,7 @@ void SoundManager::loadSoundsInBulk(const std::vector<std::string>& filenames,
     }
 }
 
-void SoundManager::play(int soundId) { 
+void SoundManager::play(int soundId) {
     uint32_t id = static_cast<uint32_t>(soundId);
     if (sounds.count(id) && sounds[id] != nullptr) {
         Mix_Chunk* targetChunk = sounds[id];
@@ -179,7 +189,7 @@ void SoundManager::play(int soundId) {
             newChannel = nextVictim;
             Mix_HaltChannel(newChannel);
             Mix_PlayChannel(newChannel, targetChunk, 0);
-            nextVictim = (nextVictim + 1) % 256; 
+            nextVictim = (nextVictim + 1) % 256;
         }
 
         if (newChannel != -1) {
@@ -204,7 +214,7 @@ void SoundManager::playPreview(const std::string& fullPath) {
     Mix_Chunk* previewChunk = Mix_LoadWAV_RW(rw, 1);
     if (previewChunk) {
         Mix_PlayChannel(255, previewChunk, -1);
-        Mix_Volume(255, 80); 
+        Mix_Volume(255, 80);
         currentPreviewChunk = previewChunk;
         lastPath = fullPath;
     }
@@ -229,15 +239,26 @@ void SoundManager::clear() {
     for (auto& pair : sounds) {
         if (pair.second) Mix_FreeChunk(pair.second);
     }
-    // ★エラー修正：キーの型を uint32_t に合わせる
     std::unordered_map<uint32_t, Mix_Chunk*>().swap(sounds);
     std::unordered_map<uint32_t, int>().swap(activeChannels);
-    
+
     boxIndex.clear();
     currentTotalMemory = 0;
+    sounds.reserve(4000);
+
+    // Switch向けメモリ断片化対策：音声サブシステムをリセット
+    Mix_CloseAudio();
+    if (Mix_OpenAudio(22050, MIX_DEFAULT_FORMAT, 1, 512) < 0) {
+        std::cerr << "Mix_OpenAudio Error during clear: " << Mix_GetError() << std::endl;
+    }
+    Mix_AllocateChannels(256);
 }
 
 void SoundManager::cleanup() {
     clear();
-    Mix_CloseAudio(); // アプリ終了時のみ閉じる
+    Mix_CloseAudio();
 }
+
+
+
+

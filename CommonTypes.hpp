@@ -6,135 +6,166 @@
 #include <cstdint>
 #include <SDL2/SDL.h>
 
-/**
- * シーンからの戻り値を定義
- */
-enum class SelectSceneResult {
-    CONTINUE,           // 継続
-    PLAY_SONG,          // 曲決定
-    BACK_TO_MODE_SELECT,// モードセレクトへ戻る
-    QUIT_GAME           // ゲーム終了
-};
-
-/**
- * クリア状態の定義
- */
-enum class ClearType : int {
+// ============================================================
+//  クリアタイプ
+// ============================================================
+enum class ClearType {
     NO_PLAY = 0,
-    FAILED = 1,
-    DAN_CLEAR = 2,
-    ASSIST_CLEAR = 3,
-    EASY_CLEAR = 4,
-    NORMAL_CLEAR = 5,
-    HARD_CLEAR = 6,
-    EX_HARD_CLEAR = 7,
-    FULL_COMBO = 8
+    FAILED,
+    ASSIST_CLEAR,
+    EASY_CLEAR,
+    NORMAL_CLEAR,
+    HARD_CLEAR,
+    EX_HARD_CLEAR,
+    DAN_CLEAR,
+    FULL_COMBO
 };
 
-/**
- * ノーツ情報
- */
-struct PlayableNote { 
-    double target_ms; 
-    int64_t y;
-    int lane; 
-    
-    // ★最優先修正：std::string channel_name を廃止し、数値IDにする
-    // ロード時に SoundManager 等で "piano1.wav" -> 123 のように変換しておく
-    uint32_t soundId = 0; 
-
-    bool played = false; 
-    bool isBGM = false; 
-
-    // ロングノーツ(LN)用
-    bool isLN = false;
-    int64_t l = 0;
-    double duration_ms = 0;
-    bool isBeingPressed = false;
-    bool end_processed = false;
-
-    // 構造体のサイズを固定（Trivially Copyable）に保つことで、
-    // メモリコピーの速度を極限まで高め、キャッシュヒット率を改善する
+// ============================================================
+//  ★修正：判定表示用
+//  std::string text を廃止し enum JudgeKind に置き換える。
+//  判定が出るたびに string の heap alloc が発生していた問題を根絶。
+//  文字列・色は描画側の定数テーブルで引く。
+// ============================================================
+enum class JudgeKind : uint8_t {
+    NONE = 0,
+    POOR,    // judgeType -1
+    BAD,     // judgeType  0
+    GOOD,    // judgeType  1
+    GREAT,   // judgeType  2
+    PGREAT   // judgeType  3
 };
 
-/**
- * 小節線
- */
-struct PlayableLine { 
-    double target_ms; 
-    int64_t y;
+// judgeType (int) → JudgeKind の変換ヘルパー
+inline JudgeKind judgeTypeToKind(int t) {
+    switch (t) {
+        case  3: return JudgeKind::PGREAT;
+        case  2: return JudgeKind::GREAT;
+        case  1: return JudgeKind::GOOD;
+        case  0: return JudgeKind::BAD;
+        default: return JudgeKind::POOR;
+    }
+}
+
+// 描画時に使う定数テーブル（heap alloc ゼロ）
+inline const char* judgeKindToText(JudgeKind k) {
+    switch (k) {
+        case JudgeKind::PGREAT: return "P-GREAT";
+        case JudgeKind::GREAT:  return "GREAT";
+        case JudgeKind::GOOD:   return "GOOD";
+        case JudgeKind::BAD:    return "BAD";
+        case JudgeKind::POOR:   return "POOR";
+        default:                return "";
+    }
+}
+
+inline SDL_Color judgeKindToColor(JudgeKind k) {
+    switch (k) {
+        case JudgeKind::PGREAT: return {255, 255, 255, 255};
+        case JudgeKind::GREAT:  return {255, 255,   0, 255};
+        case JudgeKind::GOOD:   return {255, 255,   0, 255};
+        case JudgeKind::BAD:    return {255, 128,   0, 255};
+        case JudgeKind::POOR:   return {255, 128,   0, 255};
+        default:                return {255, 255, 255, 255};
+    }
+}
+
+struct JudgmentDisplay {
+    JudgeKind kind    = JudgeKind::NONE;
+    uint32_t  startTime = 0;
+    bool      active  = false;
+    bool      isFast  = false;
+    bool      isSlow  = false;
+
+    // 後方互換ヘルパー：描画側でテキストが必要なときに呼ぶ
+    const char*  text()  const { return judgeKindToText(kind); }
+    SDL_Color    color() const { return judgeKindToColor(kind); }
 };
 
-/**
- * 判定エフェクト
- */
-struct ActiveEffect { 
-    int lane; 
-    uint32_t startTime; 
+// ============================================================
+//  ノーツ情報
+// ============================================================
+struct PlayableNote {
+    double   target_ms  = 0.0;
+    int64_t  y          = 0;
+    int      lane       = 0;
+    uint32_t soundId    = 0;    // string を廃止し数値IDで管理
+
+    bool played         = false;
+    bool isBGM          = false;
+
+    // ロングノーツ用
+    bool   isLN          = false;
+    int64_t l            = 0;
+    double  duration_ms  = 0.0;
+    bool    isBeingPressed = false;
+    bool    end_processed  = false;
 };
 
-/**
- * 判定表示用
- */
-struct JudgmentDisplay { 
-    std::string text; 
-    uint32_t startTime; 
-    bool active = false; 
-    SDL_Color color = {255, 255, 255, 255}; 
-
-    bool isFast = false;
-    bool isSlow = false;
-
-    JudgmentDisplay() : text(""), startTime(0), active(false), isFast(false), isSlow(false) {}
-
-    JudgmentDisplay(std::string t, uint32_t s, bool a, SDL_Color c, bool f = false, bool sl = false)
-        : text(t), startTime(s), active(a), color(c), isFast(f), isSlow(sl) {}
+// ============================================================
+//  小節線
+// ============================================================
+struct PlayableLine {
+    double  target_ms = 0.0;
+    int64_t y         = 0;
 };
 
-/**
- * プレイ状況
- */
+// ============================================================
+//  判定エフェクト
+// ============================================================
+struct ActiveEffect {
+    int      lane;
+    uint32_t startTime;
+};
+
+// ============================================================
+//  プレイ状況
+//  gaugeHistory は最大サンプル数を reserve するだけで十分。
+//  配列サイズが固定なら std::array も検討できるが、
+//  曲の長さで変わるため vector + reserve を維持する。
+// ============================================================
 struct PlayStatus {
-    int pGreatCount = 0;
-    int greatCount = 0;
-    int goodCount = 0;
-    int badCount = 0;
-    int poorCount = 0;
+    int pGreatCount  = 0;
+    int greatCount   = 0;
+    int goodCount    = 0;
+    int badCount     = 0;
+    int poorCount    = 0;
 
-    int fastCount = 0;
-    int slowCount = 0;
+    int fastCount    = 0;
+    int slowCount    = 0;
 
-    int combo = 0;
-    int maxCombo = 0;
-    int totalNotes = 0;
+    int combo        = 0;
+    int maxCombo     = 0;
+    int totalNotes   = 0;
     int remainingNotes = 0;
-    double currentBpm = 0;
-    double maxTargetMs = 0;
-    double gauge = 22.0;
-    bool isFailed = false;
-    int exScore = 0;
+    double currentBpm  = 0.0;
+    double maxTargetMs = 0.0;
+    double gauge       = 22.0;
+    bool   isFailed    = false;
+    int    exScore     = 0;
 
     ClearType clearType = ClearType::NO_PLAY;
     bool isDead = false;
 
-    std::vector<float> gaugeHistory; 
+    // ★修正：初期化時に reserve して再アロケーションを防ぐ（PlayEngine::init で実施）
+    std::vector<float> gaugeHistory;
 };
 
-/**
- * ベストスコア記録用
- */
+// ============================================================
+//  ベストスコア記録用
+// ============================================================
 struct BestScore {
-    int pGreat = 0;
-    int great = 0;
-    int good = 0;
-    int bad = 0;
-    int poor = 0;
+    int pGreat   = 0;
+    int great    = 0;
+    int good     = 0;
+    int bad      = 0;
+    int poor     = 0;
 
     int fastCount = 0;
     int slowCount = 0;
 
-    int maxCombo = 0;
-    int exScore = 0;
+    int maxCombo  = 0;
+    int exScore   = 0;
     std::string rank = "F";
     ClearType clearType = ClearType::NO_PLAY;
     bool isClear = false;
@@ -142,13 +173,13 @@ struct BestScore {
     std::vector<float> gaugeHistory;
 };
 
-// VideoFrame 構造体を以下のように更新してください
+// ============================================================
+//  動画フレーム
+// ============================================================
 struct VideoFrame {
-    double pts = -1.0;
-    
-    // ポインタ経由でのアクセス用
-    uint8_t* yPtr = nullptr;
-    uint8_t* uPtr = nullptr;
+    double   pts  = -1.0;
+    uint8_t* yPtr = nullptr;    // memoryPool 内の固定位置を指すポインタ
+    uint8_t* uPtr = nullptr;    // NV12 の場合は UV インターリーブ済みのポインタ
     uint8_t* vPtr = nullptr;
 
     int yStride = 0;
@@ -156,4 +187,8 @@ struct VideoFrame {
     int vStride = 0;
 };
 
-#endif
+#endif // COMMONTYPES_HPP
+
+
+
+

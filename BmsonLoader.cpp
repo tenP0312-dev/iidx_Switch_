@@ -68,6 +68,7 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
     data.header.level = (int)get_double_safe_internal(info, "level", 0.0);
     data.header.total = get_double_safe_internal(info, "total", 100.0);
     data.header.judgeRank = get_double_safe_internal(info, "judge_rank", 100.0);
+    data.header.resolution = (int)get_double_safe_internal(info, "resolution", 480.0);
     data.header.eyecatch = get_string_safe_internal(info, "eyecatch_image", "");
     data.header.banner = get_string_safe_internal(info, "banner_image", "");
     data.header.preview = get_string_safe_internal(info, "preview_music", "");
@@ -105,9 +106,6 @@ static void parse_bmson_internal(const nlohmann::json& j, BMSData& data, const s
             BMSSoundChannel channel;
             channel.name = get_string_safe_internal(ch, "name", "");
             
-            // 音源ロード（実際のバイナリ読み込みはSoundManager::loadSingleSoundがRWFromMemで行う想定）
-            SoundManager::getInstance().loadSingleSound(channel.name, rootDir, bmsonName);
-
             if (ch.contains("notes") && ch["notes"].is_array()) {
                 for (auto& n : ch["notes"]) {
                     int64_t x = n.value("x", (int64_t)0);
@@ -194,3 +192,6 @@ BMSHeader BmsonLoader::loadHeader(const std::string& path) {
     } catch (...) {}
     return temp_data.header;
 }
+
+
+

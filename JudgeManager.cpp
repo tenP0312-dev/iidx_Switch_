@@ -3,7 +3,7 @@
 #include <algorithm>
 
 void JudgeManager::updateGauge(PlayStatus& status, int judgeType, bool isHit, double baseRecoveryPerNote) {
-    int currentInternal = std::round(status.gauge * 50.0);
+    int currentInternal = (int)std::round(status.gauge * 50.0);
     int delta = 0;
     int opt = Config::GAUGE_OPTION;
 
@@ -21,8 +21,7 @@ void JudgeManager::updateGauge(PlayStatus& status, int judgeType, bool isHit, do
             else if (opt == 5) delta = isHit ? -75 : -125;
             if ((opt == 3 || opt == 5) && currentInternal <= 1500) delta /= 2;
         }
-    } else { // 回復型 (NORMAL: 0, EASY: 1, LIGHT: 2)
-        // --- 【追加】ご提示の計算式に基づく回復率の算出 ---
+    } else { // 回復型 (NORMAL: 0, EASY: 1, ASSIST: 2)
         int notes = status.totalNotes;
         double calcRecovery = 0.0;
         if (notes > 0) {
@@ -32,11 +31,10 @@ void JudgeManager::updateGauge(PlayStatus& status, int judgeType, bool isHit, do
                 calcRecovery = 80000.0 / (((notes - 350) / 3.0 + 350.0) * 6.0);
             }
         }
-        // ------------------------------------------------
 
-        double recoveryScale = 1.0; 
-        
-        if (judgeType >= 2) delta = (int)(calcRecovery * recoveryScale);
+        double recoveryScale = 1.0;
+
+        if (judgeType >= 2)      delta = (int)(calcRecovery * recoveryScale);
         else if (judgeType == 1) delta = (int)((calcRecovery / 2.0) * recoveryScale);
         else {
             delta = isHit ? -100 : -300;
@@ -48,7 +46,8 @@ void JudgeManager::updateGauge(PlayStatus& status, int judgeType, bool isHit, do
     if (currentInternal > 5000) currentInternal = 5000;
     if (opt >= 3 || opt == 6) {
         if (currentInternal <= 0) {
-            status.gauge = 0.0; status.isFailed = true; status.isDead = true; status.clearType = ClearType::FAILED;
+            status.gauge = 0.0; status.isFailed = true; status.isDead = true;
+            status.clearType = ClearType::FAILED;
             return;
         }
     } else {
@@ -57,10 +56,13 @@ void JudgeManager::updateGauge(PlayStatus& status, int judgeType, bool isHit, do
     status.gauge = (double)currentInternal / 50.0;
 }
 
+// ★修正：std::string label を廃止し JudgeKind を返す。
+// 呼び出し元が currentJudge = {"P-GREAT", ...} などと string を構築していた
+// ヒープアロケーションを根絶する。
 JudgeManager::JudgeUI JudgeManager::getJudgeUIData(int judgeType) {
-    if (judgeType == 3) return {"P-GREAT", {255, 255, 255, 255}};
-    if (judgeType == 2) return {"GREAT", {255, 255, 0, 255}};
-    if (judgeType == 1) return {"GOOD", {255, 255, 0, 255}};
-    if (judgeType == 0) return {"BAD", {255, 128, 0, 255}};
-    return {"POOR", {255, 128, 0, 255}};
+    return { judgeTypeToKind(judgeType) };
 }
+
+
+
+

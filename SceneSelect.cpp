@@ -260,7 +260,8 @@ void SceneSelect::init(bool forceScan, SDL_Renderer* ren, NoteRenderer& renderer
     backToModeSelectRequested = false;
 
     // --- プレビュー用タイマー初期化 ---
-    previewTimer = 0;
+    previewPendingStartTime = 0;
+    previewPending = false;
 
     if (songGroups.empty()) {
         selectedIndex = 0;
@@ -563,26 +564,24 @@ std::string SceneSelect::update(SDL_Renderer* ren, NoteRenderer& renderer, int c
         }
     }
 
-    // --- 【修正】プレビュー再生ロジック ---
+    // ★修正：previewTimer (フレームカウンタ) を廃止し、SDL_GetTicks() ベースに変更。
+    // フレームカウンタはフレームレートに依存するため 30fps/60fps で待機時間が変わる問題があった。
     if (selectedIndex != lastSelectedIndex) {
         lastSelectedIndex = selectedIndex;
-        previewTimer = 30; // 約0.5秒の待機（Debounce）
+        previewPendingStartTime = currentTime;
+        previewPending = true;
         SoundManager::getInstance().stopPreview();
     }
 
-    if (previewTimer > 0) {
-        previewTimer--;
-        if (previewTimer == 0 && currentState == SelectState::SELECT_SONG) {
+    if (previewPending && (currentTime - previewPendingStartTime >= PREVIEW_DELAY_MS)) {
+        previewPending = false;
+        if (currentState == SelectState::SELECT_SONG) {
             if (!songGroups.empty() && !songGroups[selectedIndex].isFolder) {
                 const auto& g = songGroups[selectedIndex];
                 const auto& entry = songCache[g.songIndices[g.currentDiffIdx]];
-                
-                // 【修正】SongEntryに追加したプレビューパスがあればそれを使用
                 if (!entry.previewPath.empty()) {
                     SoundManager::getInstance().playPreview(entry.previewPath);
-                } 
-                // なければヘッダーを読み込んで再生を試みる（安全策）
-                else {
+                } else {
                     BMSHeader header = BmsonLoader::loadHeader(entry.filename);
                     if (!header.preview.empty()) {
                         fs::path root = fs::path(entry.filename).parent_path();
@@ -609,3 +608,8 @@ bool SceneSelect::isOneMoreFolderSelected() const {
 
 void SceneSelect::renderOptionOverlay(SDL_Renderer* ren, NoteRenderer& renderer) {}
 void SceneSelect::renderExitDialog(SDL_Renderer* ren, NoteRenderer& renderer) {}
+
+
+
+
+

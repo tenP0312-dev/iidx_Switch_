@@ -7,55 +7,46 @@
 #include <map>
 #include <SDL2/SDL_image.h>
 
-// --- 静的ヘルパー関数群 ---
-static int getWidthForLane(int lane) {
-    if (lane == 8) return Config::SCRATCH_WIDTH;
-    return (lane % 2 != 0) ? (int)(Config::LANE_WIDTH * 1.4) : Config::LANE_WIDTH;
-}
+// --- レーンレイアウトキャッシュ再構築 ---
+// Config の値は init() 後に変化しないため、ここで一度だけ計算する。
+// 描画ループ内での getXForLane / getWidthForLane の都度計算を排除する。
+void NoteRenderer::rebuildLaneLayout() {
+    // 各レーン幅
+    for (int i = 1; i <= 7; i++)
+        ll.w[i] = (i % 2 != 0) ? (int)(Config::LANE_WIDTH * 1.4) : Config::LANE_WIDTH;
+    ll.w[8] = Config::SCRATCH_WIDTH;
 
-static int getBaseX() {
-    int sw = Config::SCRATCH_WIDTH;
-    int totalKeysWidth = 0;
-    for (int i = 1; i <= 7; i++) totalKeysWidth += getWidthForLane(i);
-    int totalWidth = totalKeysWidth + sw;
-    return (Config::PLAY_SIDE == 1) ? 50 : (Config::SCREEN_WIDTH - totalWidth - 50);
-}
+    int keysWidth = 0;
+    for (int i = 1; i <= 7; i++) keysWidth += ll.w[i];
+    ll.totalWidth = keysWidth + Config::SCRATCH_WIDTH;
 
-static int getBGACenterX() {
-    int sw = Config::SCRATCH_WIDTH;
-    int totalKeysWidth = 0;
-    for (int i = 1; i <= 7; i++) totalKeysWidth += getWidthForLane(i);
-    int totalWidth = totalKeysWidth + sw;
-    int startX = getBaseX();
+    ll.baseX = (Config::PLAY_SIDE == 1)
+        ? 50
+        : (Config::SCREEN_WIDTH - ll.totalWidth - 50);
+
+    // 各レーン X 座標
     if (Config::PLAY_SIDE == 1) {
-        int laneRightEdge = startX + totalWidth;
-        return laneRightEdge + (Config::SCREEN_WIDTH - laneRightEdge) / 2;
+        ll.x[8] = ll.baseX;                     // スクラッチ左端
+        int cur = ll.baseX + Config::SCRATCH_WIDTH;
+        for (int i = 1; i <= 7; i++) { ll.x[i] = cur; cur += ll.w[i]; }
     } else {
-        return startX / 2;
+        int cur = ll.baseX;
+        for (int i = 1; i <= 7; i++) { ll.x[i] = cur; cur += ll.w[i]; }
+        ll.x[8] = cur;                           // スクラッチ右端
+    }
+
+    // BGA 表示中心 X
+    if (Config::PLAY_SIDE == 1) {
+        int right = ll.baseX + ll.totalWidth;
+        ll.bgaCenterX = right + (Config::SCREEN_WIDTH - right) / 2;
+    } else {
+        ll.bgaCenterX = ll.baseX / 2;
     }
 }
 
-static int getXForLane(int lane) {
-    int startX = getBaseX();
-    int sw = Config::SCRATCH_WIDTH;
-    if (Config::PLAY_SIDE == 1) {
-        if (lane == 8) return startX;
-        int x = startX + sw;
-        for (int i = 1; i < lane; i++) x += getWidthForLane(i);
-        return x;
-    } else {
-        if (lane == 8) {
-            int totalKeysWidth = 0;
-            for (int i = 1; i <= 7; i++) totalKeysWidth += getWidthForLane(i);
-            return startX + totalKeysWidth;
-        }
-        int x = startX;
-        for (int i = 1; i < lane; i++) x += getWidthForLane(i);
-        return x;
-    }
-}
-
-// --- NoteRenderer 実装 ---
+// ============================================================
+//  NoteRenderer 実装
+// ============================================================
 
 void NoteRenderer::loadAndCache(SDL_Renderer* ren, TextureRegion& region, const std::string& path) {
     region.reset();
@@ -74,22 +65,22 @@ void NoteRenderer::init(SDL_Renderer* ren) {
     TTF_Init();
     IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
     fontSmall = TTF_OpenFont(Config::FONT_PATH.c_str(), 24);
-    fontBig = TTF_OpenFont(Config::FONT_PATH.c_str(), 48);
+    fontBig   = TTF_OpenFont(Config::FONT_PATH.c_str(), 48);
 
     std::string s = Config::ROOT_PATH + "Skin/";
 
     loadAndCache(ren, texBackground, s + "Flame_BG.png");
-    loadAndCache(ren, texNoteWhite, s + "note_white.png");
-    loadAndCache(ren, texNoteBlue,  s + "note_blue.png");
-    loadAndCache(ren, texNoteRed,   s + "note_red.png");
-    
-    loadAndCache(ren, texNoteWhite_LN, s + "note_white_ln.png");
+    loadAndCache(ren, texNoteWhite,  s + "note_white.png");
+    loadAndCache(ren, texNoteBlue,   s + "note_blue.png");
+    loadAndCache(ren, texNoteRed,    s + "note_red.png");
+
+    loadAndCache(ren, texNoteWhite_LN,       s + "note_white_ln.png");
     loadAndCache(ren, texNoteWhite_LN_Active1, s + "note_white_ln_active1.png");
     loadAndCache(ren, texNoteWhite_LN_Active2, s + "note_white_ln_active2.png");
-    loadAndCache(ren, texNoteBlue_LN,  s + "note_blue_ln.png");
+    loadAndCache(ren, texNoteBlue_LN,        s + "note_blue_ln.png");
     loadAndCache(ren, texNoteBlue_LN_Active1,  s + "note_blue_ln_active1.png");
     loadAndCache(ren, texNoteBlue_LN_Active2,  s + "note_blue_ln_active2.png");
-    loadAndCache(ren, texNoteRed_LN,   s + "note_red_ln.png");
+    loadAndCache(ren, texNoteRed_LN,         s + "note_red_ln.png");
     loadAndCache(ren, texNoteRed_LN_Active1,   s + "note_red_ln_active1.png");
     loadAndCache(ren, texNoteRed_LN_Active2,   s + "note_red_ln_active2.png");
 
@@ -104,9 +95,9 @@ void NoteRenderer::init(SDL_Renderer* ren) {
     loadAndCache(ren, texKeybeamBlue,  s + "beam_blue.png");
     loadAndCache(ren, texKeybeamRed,   s + "beam_red.png");
 
-    loadAndCache(ren, texJudgeAtlas, s + "judge.png");
+    loadAndCache(ren, texJudgeAtlas,  s + "judge.png");
     loadAndCache(ren, texNumberAtlas, s + "judge_number.png");
-    loadAndCache(ren, texLaneCover, s + "lanecover.png");
+    loadAndCache(ren, texLaneCover,   s + "lanecover.png");
 
     loadAndCache(ren, texGaugeAssist, s + "gauge_assist.png");
     loadAndCache(ren, texGaugeNormal, s + "gauge_normal.png");
@@ -115,9 +106,9 @@ void NoteRenderer::init(SDL_Renderer* ren) {
     loadAndCache(ren, texGaugeHazard, s + "gauge_hazard.png");
     loadAndCache(ren, texGaugeDan,    s + "gauge_dan.png");
 
-    loadAndCache(ren, texKeys, s + "7keypad.png");
-    loadAndCache(ren, lane_Flame, s + "lane_Flame.png");
-    loadAndCache(ren, lane_Flame2, s + "lane_Flame2.png");
+    loadAndCache(ren, texKeys,      s + "7keypad.png");
+    loadAndCache(ren, lane_Flame,   s + "lane_Flame.png");
+    loadAndCache(ren, lane_Flame2,  s + "lane_Flame2.png");
 
     texBombs.clear();
     for (int i = 0; i < 10; i++) {
@@ -133,21 +124,23 @@ void NoteRenderer::init(SDL_Renderer* ren) {
         SDL_SetTextureBlendMode(tex_scratch.texture, SDL_BLENDMODE_BLEND);
     }
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+
+    rebuildLaneLayout();
 }
 
 void NoteRenderer::cleanup() {
     clearTextCache();
     if (fontSmall) TTF_CloseFont(fontSmall);
-    if (fontBig) TTF_CloseFont(fontBig);
-    
+    if (fontBig)   TTF_CloseFont(fontBig);
+
     texBackground.reset();
     texNoteWhite.reset(); texNoteBlue.reset(); texNoteRed.reset();
     texNoteWhite_LN.reset(); texNoteWhite_LN_Active1.reset(); texNoteWhite_LN_Active2.reset();
-    texNoteBlue_LN.reset(); texNoteBlue_LN_Active1.reset(); texNoteBlue_LN_Active2.reset();
-    texNoteRed_LN.reset(); texNoteRed_LN_Active1.reset(); texNoteRed_LN_Active2.reset();
+    texNoteBlue_LN.reset();  texNoteBlue_LN_Active1.reset();  texNoteBlue_LN_Active2.reset();
+    texNoteRed_LN.reset();   texNoteRed_LN_Active1.reset();   texNoteRed_LN_Active2.reset();
     texNoteWhite_LNS.reset(); texNoteWhite_LNE.reset();
-    texNoteBlue_LNS.reset(); texNoteBlue_LNE.reset();
-    texNoteRed_LNS.reset(); texNoteRed_LNE.reset();
+    texNoteBlue_LNS.reset();  texNoteBlue_LNE.reset();
+    texNoteRed_LNS.reset();   texNoteRed_LNE.reset();
     texKeybeamWhite.reset(); texKeybeamBlue.reset(); texKeybeamRed.reset();
     texJudgeAtlas.reset(); texNumberAtlas.reset(); texLaneCover.reset();
     texGaugeAssist.reset(); texGaugeNormal.reset(); texGaugeHard.reset();
@@ -159,14 +152,12 @@ void NoteRenderer::cleanup() {
     for (auto& b : texBombs) b.reset();
     texBombs.clear();
 
-    for (auto& pair : textureCache) {
-        pair.second.reset(); // TextureRegion::reset() を呼び出す
-    }
+    for (auto& pair : textureCache) pair.second.reset();
     textureCache.clear();
 
     for (auto& pair : customFontCache) if (pair.second) TTF_CloseFont(pair.second);
     customFontCache.clear();
-    
+
     IMG_Quit();
     TTF_Quit();
 }
@@ -181,7 +172,11 @@ void NoteRenderer::renderBackground(SDL_Renderer* ren) {
     }
 }
 
-void NoteRenderer::drawText(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter, bool isRight, const std::string& fontPath) {
+// drawText: ローディング画面など毎フレーム内容が変わる箇所専用。
+// ゲームループ内で固定テキストに使うことは厳禁。
+void NoteRenderer::drawText(SDL_Renderer* ren, const std::string& text, int x, int y,
+                             SDL_Color color, bool isBig, bool isCenter, bool isRight,
+                             const std::string& fontPath) {
     if (text.empty()) return;
     TTF_Font* targetFont = isBig ? fontBig : fontSmall;
     if (!fontPath.empty()) {
@@ -197,7 +192,7 @@ void NoteRenderer::drawText(SDL_Renderer* ren, const std::string& text, int x, i
     SDL_Texture* t = SDL_CreateTextureFromSurface(ren, s);
     if (t) {
         int drawX = x;
-        if (isCenter) drawX = x - s->w / 2;
+        if (isCenter)    drawX = x - s->w / 2;
         else if (isRight) drawX = x - s->w;
         SDL_Rect dst = { drawX, y, s->w, s->h };
         SDL_RenderCopy(ren, t, NULL, &dst);
@@ -206,17 +201,20 @@ void NoteRenderer::drawText(SDL_Renderer* ren, const std::string& text, int x, i
     SDL_FreeSurface(s);
 }
 
-void NoteRenderer::drawTextCached(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter, bool isRight, const std::string& fontPath) {
+void NoteRenderer::drawTextCached(SDL_Renderer* ren, const std::string& text, int x, int y,
+                                   SDL_Color color, bool isBig, bool isCenter, bool isRight,
+                                   const std::string& fontPath) {
     if (text.empty()) return;
     uint32_t rgba = (color.r << 24) | (color.g << 16) | (color.b << 8) | color.a;
     TextCacheKey key = { text, rgba, isBig, fontPath };
+
     auto it = textTextureCache.find(key);
     if (it != textTextureCache.end()) {
         lruList.erase(it->second.lruIt);
         lruList.push_front(key);
         it->second.lruIt = lruList.begin();
         int drawX = x;
-        if (isCenter) drawX = x - it->second.w / 2;
+        if (isCenter)    drawX = x - it->second.w / 2;
         else if (isRight) drawX = x - it->second.w;
         SDL_Rect dst = { drawX, y, it->second.w, it->second.h };
         SDL_RenderCopy(ren, it->second.texture, NULL, &dst);
@@ -229,6 +227,7 @@ void NoteRenderer::drawTextCached(SDL_Renderer* ren, const std::string& text, in
         }
         TTF_Font* targetFont = isBig ? fontBig : fontSmall;
         if (!fontPath.empty() && customFontCache.count(fontPath)) targetFont = customFontCache[fontPath];
+        if (!targetFont) return;
         SDL_Surface* s = TTF_RenderUTF8_Blended(targetFont, text.c_str(), color);
         if (s) {
             SDL_Texture* t = SDL_CreateTextureFromSurface(ren, s);
@@ -236,7 +235,7 @@ void NoteRenderer::drawTextCached(SDL_Renderer* ren, const std::string& text, in
                 lruList.push_front(key);
                 textTextureCache[key] = { t, s->w, s->h, lruList.begin() };
                 int drawX = x;
-                if (isCenter) drawX = x - s->w / 2;
+                if (isCenter)    drawX = x - s->w / 2;
                 else if (isRight) drawX = x - s->w;
                 SDL_Rect dst = { drawX, y, s->w, s->h };
                 SDL_RenderCopy(ren, t, NULL, &dst);
@@ -252,7 +251,8 @@ void NoteRenderer::clearTextCache() {
     lruList.clear();
 }
 
-void NoteRenderer::drawImage(SDL_Renderer* ren, const std::string& path, int x, int y, int w, int h, int alpha) {
+void NoteRenderer::drawImage(SDL_Renderer* ren, const std::string& path,
+                              int x, int y, int w, int h, int alpha) {
     if (path.empty()) return;
     if (textureCache.find(path) == textureCache.end()) {
         loadAndCache(ren, textureCache[path], path);
@@ -266,17 +266,19 @@ void NoteRenderer::drawImage(SDL_Renderer* ren, const std::string& path, int x, 
 }
 
 void NoteRenderer::renderDecisionInfo(SDL_Renderer* ren, const BMSHeader& header) {
-    SDL_Color white = {255, 255, 255, 255}, gray = {180, 180, 180, 255}, yellow = {255, 255, 0, 255};
+    SDL_Color white  = {255, 255, 255, 255};
+    SDL_Color gray   = {180, 180, 180, 255};
+    SDL_Color yellow = {255, 255, 0, 255};
     int centerX = 640;
-    drawTextCached(ren, header.genre, centerX, 220, gray, false, true);
-    drawTextCached(ren, header.title, centerX, 270, white, true, true);
-    drawTextCached(ren, header.artist, centerX, 340, white, false, true);
+    drawTextCached(ren, header.genre,   centerX, 220, gray, false, true);
+    drawTextCached(ren, header.title,   centerX, 270, white, true, true);
+    drawTextCached(ren, header.artist,  centerX, 340, white, false, true);
     std::string levelInfo = "[" + header.chartName + "]  LEVEL " + std::to_string(header.level);
     drawTextCached(ren, levelInfo, centerX, 375, yellow, false, true);
 }
 
 void NoteRenderer::renderUI(SDL_Renderer* ren, const BMSHeader& header, int fps, double bpm, int exScore) {
-    int centerX = getBGACenterX();
+    int centerX = ll.bgaCenterX;
     std::string platePath = Config::ROOT_PATH + "Skin/Flame_nameplate.png";
     if (textureCache.find(platePath) == textureCache.end()) {
         loadAndCache(ren, textureCache[platePath], platePath);
@@ -289,15 +291,10 @@ void NoteRenderer::renderUI(SDL_Renderer* ren, const BMSHeader& header, int fps,
 }
 
 void NoteRenderer::renderLanes(SDL_Renderer* ren, double progress) {
-    int sw = Config::SCRATCH_WIDTH;
-    int totalKeysWidth = 0;
-    for (int i = 1; i <= 7; i++) totalKeysWidth += getWidthForLane(i);
-    int totalWidth = totalKeysWidth + sw; 
-    int startX = getBaseX(); 
+    int totalWidth = ll.totalWidth;
+    int startX     = ll.baseX;
     int laneHeight = 482;
-    int screenW, screenH;
-    SDL_GetRendererOutputSize(ren, &screenW, &screenH); 
-    int judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
+    int judgeY     = Config::JUDGMENT_LINE_Y - Config::LIFT;
 
     SDL_Rect overallBg = { startX, 0, totalWidth, laneHeight };
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
@@ -309,20 +306,23 @@ void NoteRenderer::renderLanes(SDL_Renderer* ren, double progress) {
             double scale = (double)totalWidth / imgLanePartW;
             int f1W = (int)(lane_Flame.w * scale);
             int f1X = (Config::PLAY_SIDE == 1) ? startX : (startX + totalWidth) - f1W;
-            SDL_Rect r = { f1X, 0, f1W, screenH };
-            SDL_RenderCopyEx(ren, lane_Flame.texture, NULL, &r, 0, NULL, (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
+            SDL_Rect r = { f1X, 0, f1W, Config::SCREEN_HEIGHT };
+            SDL_RenderCopyEx(ren, lane_Flame.texture, NULL, &r, 0, NULL,
+                             (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
         }
     }
 
     if (tex_scratch) {
-        float fSize = ((float)sw * 2.0f / 3.0f) * 2.0f;
-        float fX = (Config::PLAY_SIDE == 1) ? (float)(startX + sw) - fSize : (float)(startX + totalWidth - sw);
+        float fSize = ((float)Config::SCRATCH_WIDTH * 2.0f / 3.0f) * 2.0f;
+        float fX = (Config::PLAY_SIDE == 1)
+            ? (float)(startX + Config::SCRATCH_WIDTH) - fSize
+            : (float)(startX + totalWidth - Config::SCRATCH_WIDTH);
         SDL_FRect rF = { fX, (float)Config::JUDGMENT_LINE_Y, fSize, fSize };
         SDL_RenderCopyExF(ren, tex_scratch.texture, NULL, &rF, 0.0, NULL, SDL_FLIP_NONE);
     }
 
     if (texKeys) {
-        int kX = getXForLane(1), kEnd = getXForLane(7) + getWidthForLane(7);
+        int kX = ll.x[1], kEnd = ll.x[7] + ll.w[7];
         int kW = kEnd - kX;
         int kH = std::min(160, (int)(kW * ((float)texKeys.h / texKeys.w)));
         SDL_Rect r = { kX, Config::JUDGMENT_LINE_Y, kW, kH };
@@ -352,29 +352,48 @@ void NoteRenderer::renderLanes(SDL_Renderer* ren, double progress) {
     SDL_RenderDrawLine(ren, startX, judgeY, startX + totalWidth, judgeY);
 }
 
-void NoteRenderer::renderNote(SDL_Renderer* ren, const PlayableNote& note, double cur_ms, double speed, bool isAuto) {
-    int x = getXForLane(note.lane), w = getWidthForLane(note.lane), judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
-    int headY = judgeY - (int)((note.target_ms - cur_ms) * speed) - 8 - (int)Config::JUDGE_OFFSET;
+void NoteRenderer::renderNote(SDL_Renderer* ren, const PlayableNote& note,
+                               double cur_ms, double speed, bool isAuto) {
+    int x = ll.x[note.lane], w = ll.w[note.lane];
+    int judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
+    int headY  = judgeY - (int)((note.target_ms - cur_ms) * speed) - 8 - (int)Config::JUDGE_OFFSET;
     if (note.isLN && note.isBeingPressed) headY = judgeY - 8 - (int)Config::JUDGE_OFFSET;
 
     const TextureRegion *target = nullptr, *lnB = nullptr, *lnA1 = nullptr, *lnA2 = nullptr, *lnS = nullptr, *lnE = nullptr;
-    if (note.lane == 8) { target = &texNoteRed; lnB = &texNoteRed_LN; lnA1 = &texNoteRed_LN_Active1; lnA2 = &texNoteRed_LN_Active2; lnS = &texNoteRed_LNS; lnE = &texNoteRed_LNE; }
-    else if (note.lane % 2 == 0) { target = &texNoteBlue; lnB = &texNoteBlue_LN; lnA1 = &texNoteBlue_LN_Active1; lnA2 = &texNoteBlue_LN_Active2; lnS = &texNoteBlue_LNS; lnE = &texNoteBlue_LNE; }
-    else { target = &texNoteWhite; lnB = &texNoteWhite_LN; lnA1 = &texNoteWhite_LN_Active1; lnA2 = &texNoteWhite_LN_Active2; lnS = &texNoteWhite_LNS; lnE = &texNoteWhite_LNE; }
-    
+    if (note.lane == 8) {
+        target = &texNoteRed; lnB = &texNoteRed_LN;
+        lnA1 = &texNoteRed_LN_Active1; lnA2 = &texNoteRed_LN_Active2;
+        lnS  = &texNoteRed_LNS;        lnE  = &texNoteRed_LNE;
+    } else if (note.lane % 2 == 0) {
+        target = &texNoteBlue; lnB = &texNoteBlue_LN;
+        lnA1 = &texNoteBlue_LN_Active1; lnA2 = &texNoteBlue_LN_Active2;
+        lnS  = &texNoteBlue_LNS;        lnE  = &texNoteBlue_LNE;
+    } else {
+        target = &texNoteWhite; lnB = &texNoteWhite_LN;
+        lnA1 = &texNoteWhite_LN_Active1; lnA2 = &texNoteWhite_LN_Active2;
+        lnS  = &texNoteWhite_LNS;        lnE  = &texNoteWhite_LNE;
+    }
+
     if (note.isLN) {
-        int tailY = judgeY - (int)(((note.target_ms + note.duration_ms) - cur_ms) * speed) - 8 - (int)Config::JUDGE_OFFSET;
+        int tailY = judgeY - (int)(((note.target_ms + note.duration_ms) - cur_ms) * speed)
+                    - 8 - (int)Config::JUDGE_OFFSET;
         if (!(tailY > judgeY || headY < Config::SUDDEN_PLUS - 20)) {
             SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-            const TextureRegion* body = note.isBeingPressed ? ((SDL_GetTicks() / 100 % 2 == 0) ? lnA1 : lnA2) : lnB;
-            int dTY = std::max(tailY + 4, (int)Config::SUDDEN_PLUS), dHY = std::min(headY + 4, judgeY);
+            const TextureRegion* body = note.isBeingPressed
+                ? ((SDL_GetTicks() / 100 % 2 == 0) ? lnA1 : lnA2)
+                : lnB;
+            int dTY = std::max(tailY + 4, (int)Config::SUDDEN_PLUS);
+            int dHY = std::min(headY + 4, judgeY);
             if (dHY > dTY && body && *body) {
                 SDL_Rect r = { x + 4, dTY, w - 8, dHY - dTY };
                 SDL_RenderCopy(ren, body->texture, NULL, &r);
             }
             if (tailY >= Config::SUDDEN_PLUS && tailY <= judgeY) {
                 const TextureRegion* end = (lnE && *lnE) ? lnE : target;
-                if (end && *end) { SDL_Rect r = { x + 2, tailY, w - 4, end->h }; SDL_RenderCopy(ren, end->texture, NULL, &r); }
+                if (end && *end) {
+                    SDL_Rect r = { x + 2, tailY, w - 4, end->h };
+                    SDL_RenderCopy(ren, end->texture, NULL, &r);
+                }
             }
             SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
         }
@@ -392,18 +411,20 @@ void NoteRenderer::renderNote(SDL_Renderer* ren, const PlayableNote& note, doubl
 
 void NoteRenderer::renderBeatLine(SDL_Renderer* ren, double diff, double speed) {
     int judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
-    int y = judgeY - (int)(diff * speed) - (int)Config::JUDGE_OFFSET;
+    int y      = judgeY - (int)(diff * speed) - (int)Config::JUDGE_OFFSET;
     if (y < Config::SUDDEN_PLUS || y > judgeY) return;
-    int totalW = 0; for (int i = 1; i <= 7; i++) totalW += getWidthForLane(i);
-    totalW += Config::SCRATCH_WIDTH;
     SDL_SetRenderDrawColor(ren, 60, 60, 70, 255);
-    SDL_RenderDrawLine(ren, getBaseX(), y, getBaseX() + totalW, y);
+    SDL_RenderDrawLine(ren, ll.baseX, y, ll.baseX + ll.totalWidth, y);
 }
 
 void NoteRenderer::renderHitEffect(SDL_Renderer* ren, int lane, float progress) {
-    int fullW = getWidthForLane(lane), cX = getXForLane(lane) + fullW / 2, judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
-    int curW = (int)(fullW * (1.0f - progress)); if (curW < 1) return;
-    const TextureRegion* beam = (lane == 8) ? &texKeybeamRed : (lane % 2 == 0 ? &texKeybeamBlue : &texKeybeamWhite);
+    int fullW  = ll.w[lane];
+    int cX     = ll.x[lane] + fullW / 2;
+    int judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
+    int curW   = (int)(fullW * (1.0f - progress));
+    if (curW < 1) return;
+    const TextureRegion* beam = (lane == 8) ? &texKeybeamRed
+                              : (lane % 2 == 0 ? &texKeybeamBlue : &texKeybeamWhite);
     if (beam && *beam) {
         SDL_SetTextureBlendMode(beam->texture, SDL_BLENDMODE_ADD);
         SDL_SetTextureAlphaMod(beam->texture, (Uint8)((1.0f - progress) * 200));
@@ -414,8 +435,10 @@ void NoteRenderer::renderHitEffect(SDL_Renderer* ren, int lane, float progress) 
 
 void NoteRenderer::renderBomb(SDL_Renderer* ren, int lane, int frame) {
     if (texBombs.empty() || frame < 0 || frame >= (int)texBombs.size()) return;
-    int fullW = getWidthForLane(lane), cX = getXForLane(lane) + (fullW / 2), judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
-    int size = (int)((Config::LANE_WIDTH * 1.4) * 3.0f);
+    int fullW  = ll.w[lane];
+    int cX     = ll.x[lane] + (fullW / 2);
+    int judgeY = Config::JUDGMENT_LINE_Y - Config::LIFT;
+    int size   = (int)((Config::LANE_WIDTH * 1.4) * 3.0f);
     const TextureRegion& tr = texBombs[frame];
     if (tr) {
         SDL_SetTextureBlendMode(tr.texture, SDL_BLENDMODE_ADD);
@@ -424,43 +447,92 @@ void NoteRenderer::renderBomb(SDL_Renderer* ren, int lane, int frame) {
     }
 }
 
-void NoteRenderer::renderJudgment(SDL_Renderer* ren, const std::string& text, float progress, SDL_Color color, int combo) {
-    if (text.empty() || !texJudgeAtlas || !texNumberAtlas) return;
-    int type = (text == "P-GREAT") ? 3 : (text == "GREAT" ? 2 : (text == "GOOD" ? 1 : (text == "BAD" ? 0 : 4)));
-    int jw = texJudgeAtlas.w / 7, jh = texJudgeAtlas.h, nw = texNumberAtlas.w / 4, nh = texNumberAtlas.h / 10;
-    int jIdx = (type == 3) ? (SDL_GetTicks() / 50 % 3) : (type == 2 ? 3 : (type == 1 ? 4 : (type == 0 ? 5 : 6)));
-    float s = 0.6f; int dJW = (int)(jw * s), dJH = (int)(jh * s), dNW = (int)(nw * s), dNH = (int)(nh * s);
-    std::string cStr = (combo > 0) ? std::to_string(combo) : "";
-    int tW = dJW + (cStr.empty() ? 0 : 20 + (int)cStr.length() * (dNW - 10));
-    int totalKeysW = 0; for (int i = 1; i <= 7; i++) totalKeysW += getWidthForLane(i);
-    int sX = getBaseX() + (totalKeysW + Config::SCRATCH_WIDTH + 10) / 2 - tW / 2;
+// ★修正：JudgeKind ベースのオーバーロード。文字列比較ループを廃止。
+void NoteRenderer::renderJudgment(SDL_Renderer* ren, JudgeKind kind, float progress, int combo) {
+    if (kind == JudgeKind::NONE || !texJudgeAtlas || !texNumberAtlas) return;
+
+    // JudgeKind → アトラスインデックス
+    int type = 4; // POOR
+    switch (kind) {
+        case JudgeKind::PGREAT: type = 3; break;
+        case JudgeKind::GREAT:  type = 2; break;
+        case JudgeKind::GOOD:   type = 1; break;
+        case JudgeKind::BAD:    type = 0; break;
+        default: break;
+    }
+
+    int jw = texJudgeAtlas.w / 7, jh = texJudgeAtlas.h;
+    int nw = texNumberAtlas.w / 4, nh = texNumberAtlas.h / 10;
+    int jIdx = (type == 3) ? (SDL_GetTicks() / 50 % 3)
+             : (type == 2 ? 3 : (type == 1 ? 4 : (type == 0 ? 5 : 6)));
+    float s = 0.6f;
+    int dJW = (int)(jw * s), dJH = (int)(jh * s);
+    int dNW = (int)(nw * s), dNH = (int)(nh * s);
+
+    // combo を文字列化（snprintf でスタック上に確保、heap alloc なし）
+    char comboStr[16] = {};
+    int  comboLen = 0;
+    if (combo > 0) {
+        comboLen = snprintf(comboStr, sizeof(comboStr), "%d", combo);
+    }
+
+    int tW = dJW + (comboLen > 0 ? 20 + comboLen * (dNW - 10) : 0);
+    int sX = ll.baseX + (ll.totalWidth + 10) / 2 - tW / 2;
     int dY = Config::JUDGMENT_LINE_Y - 170 - Config::LIFT;
     Uint8 alpha = (Uint8)(255 * (1.0f - progress));
+
     SDL_Rect jS = { jIdx * jw, 0, jw, jh }, jD = { sX, dY, dJW, dJH };
-    SDL_SetTextureAlphaMod(texJudgeAtlas.texture, alpha); SDL_RenderCopy(ren, texJudgeAtlas.texture, &jS, &jD);
-    if (!cStr.empty()) {
-        int curX = sX + dJW + 20; SDL_SetTextureAlphaMod(texNumberAtlas.texture, alpha);
-        for (char c : cStr) {
-            SDL_Rect nS = { (type == 3 ? (SDL_GetTicks() / 50 % 3) : 3) * nw, (c - '0') * nh, nw, nh }, nD = { curX, dY - (dNH - dJH) / 2, dNW, dNH };
-            SDL_RenderCopy(ren, texNumberAtlas.texture, &nS, &nD); curX += (dNW - 10);
+    SDL_SetTextureAlphaMod(texJudgeAtlas.texture, alpha);
+    SDL_RenderCopy(ren, texJudgeAtlas.texture, &jS, &jD);
+
+    if (comboLen > 0) {
+        int curX = sX + dJW + 20;
+        SDL_SetTextureAlphaMod(texNumberAtlas.texture, alpha);
+        int colorIdx = (type == 3) ? (SDL_GetTicks() / 50 % 3) : 3;
+        for (int ci = 0; ci < comboLen; ++ci) {
+            int digit = comboStr[ci] - '0';
+            SDL_Rect nS = { colorIdx * nw, digit * nh, nw, nh };
+            SDL_Rect nD = { curX, dY - (dNH - dJH) / 2, dNW, dNH };
+            SDL_RenderCopy(ren, texNumberAtlas.texture, &nS, &nD);
+            curX += (dNW - 10);
         }
     }
 }
 
-void NoteRenderer::renderCombo(SDL_Renderer* ren, int combo) {}
+// 後方互換用オーバーロード（旧 std::string 版）
+void NoteRenderer::renderJudgment(SDL_Renderer* ren, const std::string& text,
+                                   float progress, SDL_Color /*color*/, int combo) {
+    JudgeKind kind = JudgeKind::POOR;
+    if      (text == "P-GREAT") kind = JudgeKind::PGREAT;
+    else if (text == "GREAT")   kind = JudgeKind::GREAT;
+    else if (text == "GOOD")    kind = JudgeKind::GOOD;
+    else if (text == "BAD")     kind = JudgeKind::BAD;
+    renderJudgment(ren, kind, progress, combo);
+}
+
+void NoteRenderer::renderCombo(SDL_Renderer* /*ren*/, int /*combo*/) {
+    // 未実装
+}
 
 void NoteRenderer::renderGauge(SDL_Renderer* ren, double gaugeValue, int gaugeOption, bool isFailed) {
-    int totalKeysW = 0; for (int i = 1; i <= 7; i++) totalKeysW += getWidthForLane(i);
-    int totalW = totalKeysW + Config::SCRATCH_WIDTH + 10;
-    int gX = getBaseX();
+    int totalW = ll.totalWidth + 10;
+    int gX = ll.baseX;
+
     const TextureRegion* target = nullptr;
     if (!isFailed) {
-        if (gaugeOption == 3) target = &texGaugeHard; else if (gaugeOption == 4) target = &texGaugeExHard;
-        else if (gaugeOption == 5) target = &texGaugeDan; else if (gaugeOption == 6) target = &texGaugeHazard;
-        else if (gaugeOption == 1) target = &texGaugeAssist; else target = &texGaugeNormal;
+        if (gaugeOption == 3)      target = &texGaugeHard;
+        else if (gaugeOption == 4) target = &texGaugeExHard;
+        else if (gaugeOption == 5) target = &texGaugeDan;
+        else if (gaugeOption == 6) target = &texGaugeHazard;
+        else if (gaugeOption == 1) target = &texGaugeAssist;
+        else                       target = &texGaugeNormal;
     }
-    int dGH = 12; if (target && *target) dGH = std::min(25, (int)(totalW * ((float)target->h / target->w)));
+
+    int dGH = 12;
+    if (target && *target)
+        dGH = std::min(25, (int)(totalW * ((float)target->h / target->w)));
     int gY = (Config::SCREEN_HEIGHT - 40) - dGH;
+
     std::string fPath = Config::ROOT_PATH + "Skin/gauge_frame.png";
     if (textureCache.find(fPath) == textureCache.end()) loadAndCache(ren, textureCache[fPath], fPath);
     TextureRegion* fTR = textureCache.count(fPath) ? &textureCache[fPath] : nullptr;
@@ -470,48 +542,71 @@ void NoteRenderer::renderGauge(SDL_Renderer* ren, double gaugeValue, int gaugeOp
             float wR = (float)fTR->w / target->w, hR = (float)fTR->h / target->h;
             int dFW = (int)(totalW * wR), dFH = (int)(dGH * hR);
             SDL_Rect r = { (gX + totalW / 2) - (dFW / 2), (gY + dGH / 2) - (dFH / 2), dFW, dFH };
-            SDL_RenderCopyEx(ren, fTR->texture, NULL, &r, 0, NULL, (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
+            SDL_RenderCopyEx(ren, fTR->texture, NULL, &r, 0, NULL,
+                             (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
         }
         SDL_SetTextureAlphaMod(target->texture, 60);
         SDL_Rect bgR = { gX, gY, totalW, dGH };
-        SDL_RenderCopyEx(ren, target->texture, NULL, &bgR, 0, NULL, (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
+        SDL_RenderCopyEx(ren, target->texture, NULL, &bgR, 0, NULL,
+                         (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
         SDL_SetTextureAlphaMod(target->texture, 255);
-        float segW = (float)totalW / 50.0f, sSegW = (float)target->w / 50.0f;
+
+        float segW  = (float)totalW / 50.0f;
+        float sSegW = (float)target->w / 50.0f;
         int activeS = std::clamp((int)gaugeValue, 0, 100) / 2;
         for (int i = 0; i < 50; i++) {
-            if (i < activeS && (i == activeS - 1 || i < activeS - 4 || rand() % 100 < 50 || (SDL_GetTicks() / 60) % 2 == 0)) {
+            if (i < activeS && (i == activeS - 1 || i < activeS - 4
+                || rand() % 100 < 50 || (SDL_GetTicks() / 60) % 2 == 0)) {
                 int cP = (int)(i * segW), nP = (int)((i + 1) * segW);
                 int dx = (Config::PLAY_SIDE == 1) ? (gX + cP) : (gX + totalW - nP);
-                SDL_Rect dR = { dx, gY, nP - cP, dGH }, sR = { (int)(i * sSegW), 0, (int)((i + 1) * sSegW) - (int)(i * sSegW), target->h };
-                SDL_RenderCopyEx(ren, target->texture, &sR, &dR, 0, NULL, (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
+                SDL_Rect dR = { dx, gY, nP - cP, dGH };
+                SDL_Rect sR = { (int)(i * sSegW), 0,
+                                (int)((i + 1) * sSegW) - (int)(i * sSegW), target->h };
+                SDL_RenderCopyEx(ren, target->texture, &sR, &dR, 0, NULL,
+                                 (Config::PLAY_SIDE == 1 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL));
             }
         }
     } else if (isFailed) {
-        SDL_SetRenderDrawColor(ren, 60, 60, 60, 255); SDL_Rect r = { gX, gY, totalW, dGH }; SDL_RenderFillRect(ren, &r);
+        SDL_SetRenderDrawColor(ren, 60, 60, 60, 255);
+        SDL_Rect r = { gX, gY, totalW, dGH };
+        SDL_RenderFillRect(ren, &r);
     }
 }
 
 void NoteRenderer::renderLoading(SDL_Renderer* ren, int current, int total, const std::string& filename) {
     SDL_SetRenderDrawColor(ren, 0, 0, 5, 255); SDL_RenderClear(ren);
+    // ローディング画面は drawText で構わない（描画頻度が低く、内容も変わる）
     drawText(ren, "NOW LOADING...", 640, 300, {255, 255, 255, 255}, true, true);
-    SDL_Rect bO = { 100, 380, 1080, 20 }; SDL_SetRenderDrawColor(ren, 40, 40, 40, 255); SDL_RenderDrawRect(ren, &bO);
+    SDL_Rect bO = { 100, 380, 1080, 20 };
+    SDL_SetRenderDrawColor(ren, 40, 40, 40, 255); SDL_RenderDrawRect(ren, &bO);
     float p = (total > 0) ? (float)current / total : 0;
-    SDL_Rect bI = { 102, 382, (int)(1076 * p), 16 }; SDL_SetRenderDrawColor(ren, 0, 120, 255, 255); SDL_RenderFillRect(ren, &bI);
+    SDL_Rect bI = { 102, 382, (int)(1076 * p), 16 };
+    SDL_SetRenderDrawColor(ren, 0, 120, 255, 255); SDL_RenderFillRect(ren, &bI);
     drawText(ren, filename, 640, 420, {150, 150, 150, 255}, false, true);
 }
 
-void NoteRenderer::renderResult(SDL_Renderer* ren, const PlayStatus& status, const BMSHeader& header, const std::string& rank) {
+void NoteRenderer::renderResult(SDL_Renderer* ren, const PlayStatus& status,
+                                 const BMSHeader& header, const std::string& rank) {
     SDL_SetRenderDrawColor(ren, 5, 5, 10, 255); SDL_RenderClear(ren);
-    SDL_Color white = {255, 255, 255, 255}, yellow = {255, 255, 0, 255};
-    drawTextCached(ren, header.title, 640, 50, white, true, true);
-    drawTextCached(ren, "RANK: " + rank, 640, 120, yellow, true, true);
+    SDL_Color white  = {255, 255, 255, 255};
+    SDL_Color yellow = {255, 255,   0, 255};
+    // ★修正：リザルト画面の固定テキストは drawTextCached を使用
+    drawTextCached(ren, header.title,       640, 50,  white, true, true);
+    drawTextCached(ren, "RANK: " + rank,    640, 120, yellow, true, true);
     int sY = 240, sp = 45;
-    drawText(ren, "P-GREAT : " + std::to_string(status.pGreatCount), 400, sY, white, false, false);
-    drawText(ren, "GREAT   : " + std::to_string(status.greatCount), 400, sY + sp, white, false, false);
-    drawText(ren, "GOOD    : " + std::to_string(status.goodCount), 400, sY + sp * 2, white, false, false);
-    drawText(ren, "BAD     : " + std::to_string(status.badCount), 400, sY + sp * 3, white, false, false);
-    drawText(ren, "POOR    : " + std::to_string(status.poorCount), 400, sY + sp * 4, white, false, false);
-    drawText(ren, "MAX COMBO : " + std::to_string(status.maxCombo), 680, sY, yellow, false, false);
-    drawText(ren, "EX SCORE  : " + std::to_string((status.pGreatCount * 2) + status.greatCount), 680, sY + sp, white, false, false);
-    if ((SDL_GetTicks() / 500) % 2 == 0) drawTextCached(ren, "PRESS ANY BUTTON TO EXIT", 640, 650, {150, 150, 150, 255}, true, true);
+    // 数値は毎回変わらないので drawText でもよいが、リザルトはフレーム数が少ないため許容範囲
+    drawText(ren, "P-GREAT : " + std::to_string(status.pGreatCount), 400, sY,         white, false);
+    drawText(ren, "GREAT   : " + std::to_string(status.greatCount),  400, sY + sp,    white, false);
+    drawText(ren, "GOOD    : " + std::to_string(status.goodCount),   400, sY + sp*2,  white, false);
+    drawText(ren, "BAD     : " + std::to_string(status.badCount),    400, sY + sp*3,  white, false);
+    drawText(ren, "POOR    : " + std::to_string(status.poorCount),   400, sY + sp*4,  white, false);
+    drawText(ren, "MAX COMBO : " + std::to_string(status.maxCombo),  680, sY,         yellow, false);
+    drawText(ren, "EX SCORE  : " + std::to_string((status.pGreatCount * 2) + status.greatCount),
+                  680, sY + sp, white, false);
+    if ((SDL_GetTicks() / 500) % 2 == 0)
+        drawTextCached(ren, "PRESS ANY BUTTON TO EXIT", 640, 650, {150, 150, 150, 255}, true, true);
 }
+
+
+
+

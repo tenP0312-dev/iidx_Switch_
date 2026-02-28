@@ -19,7 +19,6 @@ struct TextureRegion {
     int w = 0;
     int h = 0;
 
-    // if (region) でテクスチャの有無を確認できるようにする
     explicit operator bool() const { return texture != nullptr; }
 
     void reset() {
@@ -29,55 +28,87 @@ struct TextureRegion {
     }
 };
 
-// --- キャッシュキーとハッシュ関数 (変更なし) ---
+// --- キャッシュキーとハッシュ関数 ---
 struct TextCacheKey {
     std::string text;
-    uint32_t color_rgba;
-    bool isBig;
+    uint32_t    color_rgba;
+    bool        isBig;
     std::string fontPath;
+
     bool operator==(const TextCacheKey& other) const {
-        return color_rgba == other.color_rgba && isBig == other.isBig && text == other.text && fontPath == other.fontPath;
+        return color_rgba == other.color_rgba
+            && isBig     == other.isBig
+            && text      == other.text
+            && fontPath  == other.fontPath;
     }
 };
 
 struct TextCacheKeyHash {
     std::size_t operator()(const TextCacheKey& k) const {
+        // ★修正：fontPath をハッシュに含める。
+        // 以前は operator== で fontPath を比較しているのにハッシュが fontPath を無視していた。
+        // これはハッシュマップの契約違反（同一キーは同一ハッシュを返さなければならない）であり、
+        // 同フォント以外のエントリが同じバケツに入って衝突が増大していた。
         std::size_t h = std::hash<std::string>{}(k.text);
         h ^= std::hash<uint32_t>{}(k.color_rgba) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<bool>{}(k.isBig) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<bool>{}(k.isBig)          + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<std::string>{}(k.fontPath) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
     }
 };
 
 class NoteRenderer {
 public:
-    void init(SDL_Renderer* ren); 
+    void init(SDL_Renderer* ren);
     void cleanup();
     void clearTextCache();
 
-    void drawText(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter = false, bool isRight = false, const std::string& fontPath = "");
-    void drawTextCached(SDL_Renderer* ren, const std::string& text, int x, int y, SDL_Color color, bool isBig, bool isCenter = false, bool isRight = false, const std::string& fontPath = "");
-    void drawImage(SDL_Renderer* ren, const std::string& path, int x, int y, int w, int h, int alpha = 255);
-    
-    // PlayableNote を const 参照で受ける (コピー根絶)
-    void renderNote(SDL_Renderer* ren, const PlayableNote& note, double cur_ms, double speed, bool isAuto = false);
-    
+    // drawText     : 毎フレーム変化するテキスト専用（ローディング・デバッグ表示等）
+    // drawTextCached: 変化が少ないテキスト専用（ゲームループ内はこちらを使うこと）
+    void drawText(SDL_Renderer* ren, const std::string& text, int x, int y,
+                  SDL_Color color, bool isBig,
+                  bool isCenter = false, bool isRight = false,
+                  const std::string& fontPath = "");
+
+    void drawTextCached(SDL_Renderer* ren, const std::string& text, int x, int y,
+                        SDL_Color color, bool isBig,
+                        bool isCenter = false, bool isRight = false,
+                        const std::string& fontPath = "");
+
+    void drawImage(SDL_Renderer* ren, const std::string& path,
+                   int x, int y, int w, int h, int alpha = 255);
+
+    void renderNote(SDL_Renderer* ren, const PlayableNote& note,
+                    double cur_ms, double speed, bool isAuto = false);
+
     void renderBackground(SDL_Renderer* ren);
     void renderLanes(SDL_Renderer* ren, double progress);
     void renderBeatLine(SDL_Renderer* ren, double diff, double speed);
     void renderHitEffect(SDL_Renderer* ren, int lane, float progress);
     void renderBomb(SDL_Renderer* ren, int lane, int frame);
-    void renderJudgment(SDL_Renderer* ren, const std::string& text, float progress, SDL_Color color, int combo = 0);
+
+    // ★修正：renderJudgment は JudgeKind ベースのオーバーロードを追加し、
+    //        文字列比較ループをなくす
+    void renderJudgment(SDL_Renderer* ren, JudgeKind kind,
+                        float progress, int combo = 0);
+    // 後方互換用（内部で kind に変換して上のオーバーロードを呼ぶ）
+    void renderJudgment(SDL_Renderer* ren, const std::string& text,
+                        float progress, SDL_Color color, int combo = 0);
+
     void renderCombo(SDL_Renderer* ren, int combo);
-    void renderGauge(SDL_Renderer* ren, double gaugeValue, int gaugeOption, bool isFailed);
-    void renderUI(SDL_Renderer* ren, const BMSHeader& header, int fps, double bpm, int exScore);
+    void renderGauge(SDL_Renderer* ren, double gaugeValue,
+                     int gaugeOption, bool isFailed);
+    void renderUI(SDL_Renderer* ren, const BMSHeader& header,
+                  int fps, double bpm, int exScore);
     void renderDecisionInfo(SDL_Renderer* ren, const BMSHeader& header);
-    void renderLoading(SDL_Renderer* ren, int current, int total, const std::string& filename);
-    void renderResult(SDL_Renderer* ren, const PlayStatus& status, const BMSHeader& header, const std::string& rank);
+    void renderLoading(SDL_Renderer* ren, int current, int total,
+                       const std::string& filename);
+    void renderResult(SDL_Renderer* ren, const PlayStatus& status,
+                      const BMSHeader& header, const std::string& rank);
 
 private:
     TTF_Font* fontSmall = nullptr;
-    TTF_Font* fontBig = nullptr;
+    TTF_Font* fontBig   = nullptr;
 
     struct CacheEntry {
         SDL_Texture* texture;
@@ -86,29 +117,44 @@ private:
     };
     std::unordered_map<TextCacheKey, CacheEntry, TextCacheKeyHash> textTextureCache;
     std::list<TextCacheKey> lruList;
-    const size_t MAX_TEXT_CACHE = 256;
+    static constexpr size_t MAX_TEXT_CACHE = 256;
 
-    std::map<std::string, TextureRegion> textureCache; // mapの中身もサイズ持ちにする
-    std::map<std::string, TTF_Font*> customFontCache;
+    std::map<std::string, TextureRegion> textureCache;
+    std::map<std::string, TTF_Font*>     customFontCache;
 
-    // --- テクスチャ群を TextureRegion に置き換え ---
     TextureRegion lane_Flame, lane_Flame2;
     TextureRegion texBackground;
     TextureRegion texNoteWhite, texNoteBlue, texNoteRed;
     TextureRegion texNoteWhite_LN, texNoteWhite_LN_Active1, texNoteWhite_LN_Active2;
-    TextureRegion texNoteBlue_LN, texNoteBlue_LN_Active1, texNoteBlue_LN_Active2;
-    TextureRegion texNoteRed_LN, texNoteRed_LN_Active1, texNoteRed_LN_Active2;
+    TextureRegion texNoteBlue_LN,  texNoteBlue_LN_Active1,  texNoteBlue_LN_Active2;
+    TextureRegion texNoteRed_LN,   texNoteRed_LN_Active1,   texNoteRed_LN_Active2;
     TextureRegion texNoteWhite_LNS, texNoteWhite_LNE;
-    TextureRegion texNoteBlue_LNS, texNoteBlue_LNE;
-    TextureRegion texNoteRed_LNS, texNoteRed_LNE;
+    TextureRegion texNoteBlue_LNS,  texNoteBlue_LNE;
+    TextureRegion texNoteRed_LNS,   texNoteRed_LNE;
     TextureRegion texKeybeamWhite, texKeybeamBlue, texKeybeamRed;
     TextureRegion texJudgeAtlas, texNumberAtlas;
     std::vector<TextureRegion> texBombs;
-    TextureRegion texLaneCover, texGaugeAssist, texGaugeNormal, texGaugeHard, texGaugeExHard, texGaugeHazard, texGaugeDan;
+    TextureRegion texLaneCover;
+    TextureRegion texGaugeAssist, texGaugeNormal, texGaugeHard,
+                  texGaugeExHard, texGaugeHazard, texGaugeDan;
     TextureRegion texKeys, tex_scratch;
 
-    // ヘルパー: ロード時にサイズを自動取得して格納する
     void loadAndCache(SDL_Renderer* ren, TextureRegion& region, const std::string& path);
+
+    // レーン座標キャッシュ（init() 時に一度だけ計算、描画ループ内で再計算しない）
+    struct LaneLayout {
+        int x[9] = {};   // lanes 1-8（インデックス0は未使用）
+        int w[9] = {};
+        int baseX      = 0;
+        int totalWidth = 0;  // 全鍵盤幅 + スクラッチ幅
+        int bgaCenterX = 0;
+    } ll;
+
+    void rebuildLaneLayout();
 };
 
-#endif
+#endif // NOTERENDERER_HPP
+
+
+
+

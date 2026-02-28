@@ -9,7 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
-#include "CommonTypes.hpp" // VideoFrame の定義はここにあるものを使用
+#include "CommonTypes.hpp"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -46,36 +46,48 @@ public:
 private:
     void videoWorker();
 
-    std::unordered_map<int, SDL_Texture*> textures;
-    std::unordered_map<int, std::string> idToFilename;
+    // ★修正：テクスチャとサイズを一緒に管理し、render() での SDL_QueryTexture を廃止する
+    struct BgaTextureEntry {
+        SDL_Texture* tex = nullptr;
+        int w = 0;
+        int h = 0;
+    };
+
+    std::unordered_map<int, BgaTextureEntry> textures;  // SDL_Texture* → BgaTextureEntry に変更
+    std::unordered_map<int, std::string>     idToFilename;
     std::string baseDir;
     std::vector<BgaEvent> bgaEvents, layerEvents, poorEvents;
     size_t currentEventIndex = 0, currentLayerIndex = 0, currentPoorIndex = 0;
     int lastDisplayedId = -1, lastLayerId = -1, lastPoorId = -1;
     bool showPoor = false;
 
-    bool isVideoMode = false;
-    bool hasNewFrameToUpload = false; // ★コンパイルエラー解消に必須
-    
-    SDL_Texture* videoTexture = nullptr;
-    AVFormatContext* pFormatCtx = nullptr;
-    AVCodecContext* pCodecCtx = nullptr;
-    AVFrame* pFrame = nullptr;
-    int videoStreamIdx = -1;
-    
-    std::thread decodeThread;
-    std::mutex frameMutex;
-    std::atomic<bool> quitThread{false};
-    std::atomic<double> sharedVideoElapsed{0.0};
-    
-    std::deque<VideoFrame> frameQueue;
-    // Switchのメモリ事情に合わせて調整（256pxなら20-30でも十分）
-    const size_t MAX_FRAME_QUEUE = 30; 
+    bool isVideoMode         = false;
+    bool hasNewFrameToUpload = false;
 
-    // ★メモリ断片化を防ぐための固定プール用vector
-    std::vector<uint8_t> memoryPoolY;
-    std::vector<uint8_t> memoryPoolU;
+    // 動画テクスチャのサイズも事前に保持する
+    SDL_Texture* videoTexture = nullptr;
+    int videoTexW = 0;
+    int videoTexH = 0;
+
+    AVFormatContext* pFormatCtx = nullptr;
+    AVCodecContext*  pCodecCtx  = nullptr;
+    AVFrame*         pFrame     = nullptr;
+    int              videoStreamIdx = -1;
+
+    std::thread             decodeThread;
+    std::mutex              frameMutex;
+    std::atomic<bool>       quitThread{false};
+    std::atomic<double>     sharedVideoElapsed{0.0};
+
+    std::deque<VideoFrame>  frameQueue;
+    const size_t MAX_FRAME_QUEUE = 30;
+
+    // メモリ断片化防止用固定プール
     std::vector<uint8_t> memoryPoolV;
 };
 
-#endif
+#endif // BGAMANAGER_HPP
+
+
+
+

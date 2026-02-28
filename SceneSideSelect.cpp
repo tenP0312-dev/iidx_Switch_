@@ -59,3 +59,6 @@ SideSelectStep SceneSideSelect::update(SDL_Renderer* ren, NoteRenderer& renderer
     SDL_RenderPresent(ren);
     return SideSelectStep::SELECTING;
 }
+
+
+

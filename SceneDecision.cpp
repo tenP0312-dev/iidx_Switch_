@@ -47,3 +47,6 @@ bool SceneDecision::run(SDL_Renderer* ren, NoteRenderer& renderer, const BMSHead
 
     return true;
 }
+
+
+

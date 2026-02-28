@@ -165,11 +165,11 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
     }
 
     // 指摘のあった「二重消費」はSoundManager側で修正済みのため、安心して呼べる
+    int lastLoadPercent = -1;
     snd.loadSoundsInBulk(soundList, bmsonDir, bmsonBaseName, [&](int processedCount, const std::string& currentName) {
         int curPercent = (processedCount * 100) / (int)data.sound_channels.size();
-        static int lastPercent = -1;
 
-        if (curPercent != lastPercent) {
+        if (curPercent != lastLoadPercent) {
             renderer.renderLoading(ren, processedCount, data.sound_channels.size(), "Audio Loading: " + currentName);
             
             uint64_t curMem = snd.getCurrentMemory();
@@ -185,7 +185,7 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
             }
             
             SDL_RenderPresent(ren);
-            lastPercent = curPercent;
+            lastLoadPercent = curPercent;
         }
 
         if (processedCount % 100 == 0) {
@@ -310,7 +310,7 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
         if (max_target_ms > 0) progress = std::clamp(cur_ms / max_target_ms, 0.0, 1.0);
         int64_t cur_y = engine.getYFromMs(cur_ms);
         auto& judge = engine.getCurrentJudge();
-        if (judge.active && (judge.text == "MISS" || judge.text == "POOR")) bga.setMissTrigger(true);
+        if (judge.active && (judge.kind == JudgeKind::POOR || judge.kind == JudgeKind::BAD)) bga.setMissTrigger(true);
         else bga.setMissTrigger(false);
 
         renderScene(ren, renderer, engine, bga, cur_ms, cur_y, fps, currentHeader, now, progress);
@@ -537,8 +537,8 @@ void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngin
         float p_raw = (float)(now - judge.startTime) / 500.0f;
         if (p_raw >= 1.0f) judge.active = false;
         else {
-            if (judge.text == "P-GREAT" || (now / 32) % 2 != 0) {
-                renderer.renderJudgment(ren, judge.text, 0.0f, judge.color, engine.getStatus().combo);
+            if (judge.kind == JudgeKind::PGREAT || (now / 32) % 2 != 0) {
+                renderer.renderJudgment(ren, judge.kind, 0.0f, engine.getStatus().combo);
             }
         }
     }
