@@ -18,8 +18,9 @@ int calculateHSRecoveryInternal(int notes) {
 }
 
 void PlayEngine::init(const BMSData& data) {
-    bmsData = data;
-    projector.init(bmsData);
+    // ★修正④: bmsData = data を削除。data は ScenePlay::run() で生存し続けるため、
+    //          参照を渡すだけで安全。sound_channels (数千ノーツ分) の二重確保を回避。
+    projector.init(data);
 
     status = PlayStatus();
     notes.clear();
@@ -59,7 +60,7 @@ void PlayEngine::init(const BMSData& data) {
     std::vector<TempNote> tempNotes;
     tempNotes.reserve(data.header.totalNotes * 2);
 
-    for (const auto& ch : bmsData.sound_channels) {
+    for (const auto& ch : data.sound_channels) {
         uint32_t sId = std::hash<std::string>{}(ch.name);
         for (const auto& n : ch.notes) {
             bool isBGM = (n.x < 1 || n.x > 8);
@@ -135,7 +136,7 @@ void PlayEngine::init(const BMSData& data) {
     });
 
     status.remainingNotes = status.totalNotes;
-    for (const auto& l : bmsData.lines) beatLines.push_back({projector.getMsFromY(l.y), l.y});
+    for (const auto& l : data.lines) beatLines.push_back({projector.getMsFromY(l.y), l.y});
 
     baseRecoveryPerNote = (double)calculateHSRecoveryInternal(status.totalNotes);
 
@@ -149,6 +150,19 @@ void PlayEngine::init(const BMSData& data) {
 
     nextUpdateIndex = 0;
     for (int i = 0; i <= 8; i++) lastSoundPerLaneId[i] = 0;
+
+    // ★修正②: レーン別インデックスを構築。processHit で全ノーツを O(N) スキャンする代わりに
+    //          そのレーンのノーツだけを O(M) で走査できるようにする。
+    //          notes は target_ms 昇順にソート済みなので、各レーン内でも昇順が保たれる。
+    for (int lane = 1; lane <= 8; ++lane) {
+        laneNoteIndices[lane].clear();
+        laneSearchStart[lane] = 0;
+        for (size_t i = 0; i < notes.size(); ++i) {
+            if (!notes[i].isBGM && notes[i].lane == lane) {
+                laneNoteIndices[lane].push_back(i);
+            }
+        }
+    }
 
     // ★修正：gaugeHistory を事前確保して push_back 時の再アロケーションを防ぐ
     status.gaugeHistory.clear();
@@ -240,24 +254,37 @@ void PlayEngine::update(double cur_ms, uint32_t now, SoundManager& snd) {
 }
 
 int PlayEngine::processHit(int lane, double cur_ms, uint32_t now, SoundManager& snd) {
-    if (status.isFailed) return 0;
+    if (status.isFailed || lane < 1 || lane > 8) return 0;
 
     bool hitSuccess = false;
     int  finalJudge = 0;
 
-    for (size_t i = nextUpdateIndex; i < notes.size(); ++i) {
-        auto& n = notes[i];
-        if (n.played || n.isBGM || n.lane != lane) continue;
+    // ★修正②: レーン別インデックスで O(1) アクセス。全ノーツの O(N) スキャンを廃止。
+    const auto& indices = laneNoteIndices[lane];
+    size_t& startIdx    = laneSearchStart[lane];
+
+    // played かつ LN を保持していないノーツは開始位置を前進させる
+    while (startIdx < indices.size()
+           && notes[indices[startIdx]].played
+           && !notes[indices[startIdx]].isBeingPressed) {
+        startIdx++;
+    }
+
+    for (size_t k = startIdx; k < indices.size(); ++k) {
+        auto& n = notes[indices[k]];
+        if (n.played && !n.isBeingPressed) { startIdx = k + 1; continue; }
         if (n.isLN && n.isBeingPressed) continue;
 
         double adjusted_target = n.target_ms + Config::JUDGE_OFFSET;
-        double raw_diff        = cur_ms - adjusted_target;
-        double diff            = std::abs(raw_diff);
 
-        if (diff > Config::JUDGE_BAD) {
-            if (adjusted_target > cur_ms + Config::JUDGE_BAD) break;
-            continue;
-        }
+        // このノーツより先はすべて未来 → 早期終了
+        if (adjusted_target > cur_ms + Config::JUDGE_BAD) break;
+
+        double raw_diff = cur_ms - adjusted_target;
+        double diff     = std::abs(raw_diff);
+
+        // 判定窓より古いノーツはスキップ（update() で POOR 処理済みのはずだが念のため）
+        if (diff > Config::JUDGE_BAD) continue;
 
         snd.play(n.soundId);
         lastSoundPerLaneId[lane] = n.soundId;
@@ -408,6 +435,7 @@ void PlayEngine::forceFail() {
     status.gauge     = 0.0;
     status.clearType = ClearType::FAILED;
 }
+
 
 
 

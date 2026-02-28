@@ -228,10 +228,8 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
         if (!processInput(-2000.0, now, snd, engine)) return false;
         bga.preLoad(0, ren);
         renderScene(ren, renderer, engine, bga, -2000.0, 0, 0, currentHeader, now, 0.0);
-        int totalWidth = (7 * Config::LANE_WIDTH) + Config::SCRATCH_WIDTH + 10;
-        int baseX = (Config::PLAY_SIDE == 1) ? 50 : (1280 - totalWidth - 50);
-        int laneCenterX = baseX + totalWidth / 2;
-        renderer.drawText(ren, "Please wait 5 seconds", laneCenterX, 450, {255, 255, 0, 255}, false, true);
+        // ★修正⑥: rebuildLaneLayout() でキャッシュ済みの値を使用（再計算を廃止）
+        renderer.drawText(ren, "Please wait 5 seconds", renderer.getLaneCenterX(), 450, {255, 255, 0, 255}, false, true);
         SDL_RenderPresent(ren);
 #ifdef __SWITCH__
         if (!appletMainLoop()) return false;
@@ -253,10 +251,8 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
         }
         if (!processInput(-2000.0, now, snd, engine)) return false;
         renderScene(ren, renderer, engine, bga, -2000.0, 0, 0, currentHeader, now, 0.0);
-        int totalWidth = (7 * Config::LANE_WIDTH) + Config::SCRATCH_WIDTH + 10;
-        int baseX = (Config::PLAY_SIDE == 1) ? 50 : (1280 - totalWidth - 50);
-        int laneCenterX = baseX + totalWidth / 2;
-        renderer.drawText(ren, "PRESS DECIDE BUTTON TO START", laneCenterX, 450, {255, 255, 255, 255}, false, true);
+        // ★修正⑥: rebuildLaneLayout() でキャッシュ済みの値を使用（再計算を廃止）
+        renderer.drawText(ren, "PRESS DECIDE BUTTON TO START", renderer.getLaneCenterX(), 450, {255, 255, 255, 255}, false, true);
         SDL_RenderPresent(ren);
 #ifdef __SWITCH__
         if (!appletMainLoop()) return false;
@@ -304,8 +300,10 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
         }
         updateAssist(cur_ms, engine, snd);
         engine.update(cur_ms + 10.0, now, snd);
-        status = engine.getStatus(); 
-        if (status.isFailed) playing = false;
+        // ★修正①: const ref で受け取ることで gaugeHistory (最大 2000 要素) の
+        //          毎フレームコピーを完全に排除。432KB/秒のヒープコピー帯域を節約。
+        const PlayStatus& s = engine.getStatus();
+        if (s.isFailed) playing = false;
         double progress = 0.0;
         if (max_target_ms > 0) progress = std::clamp(cur_ms / max_target_ms, 0.0, 1.0);
         int64_t cur_y = engine.getYFromMs(cur_ms);
@@ -315,19 +313,22 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
 
         renderScene(ren, renderer, engine, bga, cur_ms, cur_y, fps, currentHeader, now, progress);
 
-        if (!fcEffectTriggered && status.remainingNotes <= 0) {
-            bool isFC = (status.poorCount == 0 && status.badCount == 0 && status.totalNotes > 0);
+        if (!fcEffectTriggered && s.remainingNotes <= 0) {
+            bool isFC = (s.poorCount == 0 && s.badCount == 0 && s.totalNotes > 0);
             if (isFC) {
+                // ★修正①: FC 確定時に一度だけコピーし、clearType を上書き
+                status = s;
                 status.clearType = ClearType::FULL_COMBO;
                 fcEffectTriggered = true; 
                 uint32_t fcStart = SDL_GetTicks();
+                // ★修正⑥: rebuildLaneLayout() でキャッシュ済みの値を使用（再計算を廃止）
+                int baseX      = renderer.getLaneBaseX();
+                int totalWidth = renderer.getLaneTotalWidth();
+                int laneCenterX = renderer.getLaneCenterX();
                 while (SDL_GetTicks() - fcStart < 2500) {
                     uint32_t nowFC = SDL_GetTicks();
                     float p = std::min(1.0f, (float)(nowFC - fcStart) / 1000.0f);
                     renderScene(ren, renderer, engine, bga, cur_ms, cur_y, fps, currentHeader, nowFC, 1.0);
-                    int totalWidth = (7 * Config::LANE_WIDTH) + Config::SCRATCH_WIDTH + 10;
-                    int baseX = (Config::PLAY_SIDE == 1) ? 50 : (1280 - totalWidth - 50);
-                    int laneCenterX = baseX + totalWidth / 2;
                     if (gradTex) {
                         int lineY = Config::JUDGMENT_LINE_Y;
                         int uvOffset = (int)(nowFC * 1) % TEX_H; 
@@ -358,13 +359,16 @@ bool ScenePlay::run(SDL_Renderer* ren, SoundManager& snd, NoteRenderer& renderer
                 playing = false; break;           
             }
         }
-        if (cur_ms > status.maxTargetMs + 1500.0) playing = false;
+        if (cur_ms > s.maxTargetMs + 1500.0) playing = false;
         frameCount++;
         if (now - lastFpsTime >= 1000) { fps = frameCount; frameCount = 0; lastFpsTime = now; }
 #ifdef __SWITCH__
         if (!appletMainLoop()) { isAborted = true; playing = false; break; }
 #endif
     }
+
+    // ★修正①: ループ終了後に一度だけコピー（FC の場合はループ内でコピー済みなのでスキップ）
+    if (!fcEffectTriggered) status = engine.getStatus();
 
     Config::save();
 
@@ -470,7 +474,8 @@ void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngin
     double currentBpm = engine.getBpmFromMs(cur_ms);
     renderer.renderUI(ren, header, fps, currentBpm, engine.getStatus().exScore);
     bga.render(cur_y, ren, bgaX, bgaY, cur_ms);
-    renderer.renderLanes(ren, progress);
+    renderer.renderLanes(ren, progress,
+        scratchUpActive ? 1 : (scratchDownActive ? 2 : 0));
     
     double visual_speed = (Config::HIGH_SPEED * currentBpm) / 475.0; 
     double max_visible_ms = (double)Config::VISIBLE_PX / std::max(0.01, visual_speed) + 200.0;
@@ -528,9 +533,9 @@ void ScenePlay::renderScene(SDL_Renderer* ren, NoteRenderer& renderer, PlayEngin
     }
 
     // --- (以下、コンボ・判定・ゲージ等の描画ロジック 100%継承) ---
-    int totalWidth = (7 * Config::LANE_WIDTH) + Config::SCRATCH_WIDTH + 10;
-    int baseX = (Config::PLAY_SIDE == 1) ? 50 : (1280 - totalWidth - 50);
-    int laneCenterX = baseX + totalWidth / 2;
+    // ★修正⑥: NoteRenderer::ll にキャッシュ済みの値をゲッター経由で取得。
+    //          rebuildLaneLayout() と二箇所で同じ計算をして乖離するバグの芽を摘む。
+    int laneCenterX = renderer.getLaneCenterX();
 
     auto& judge = engine.getCurrentJudge();
     if (judge.active) {

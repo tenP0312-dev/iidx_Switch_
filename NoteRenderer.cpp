@@ -123,6 +123,11 @@ void NoteRenderer::init(SDL_Renderer* ren) {
         SDL_SetTextureScaleMode(tex_scratch.texture, SDL_ScaleModeBest);
         SDL_SetTextureBlendMode(tex_scratch.texture, SDL_BLENDMODE_BLEND);
     }
+    loadAndCache(ren, tex_scratch_center, s + "scratch_center.png");
+    if (tex_scratch_center) {
+        SDL_SetTextureScaleMode(tex_scratch_center.texture, SDL_ScaleModeBest);
+        SDL_SetTextureBlendMode(tex_scratch_center.texture, SDL_BLENDMODE_BLEND);
+    }
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
 
     rebuildLaneLayout();
@@ -147,7 +152,7 @@ void NoteRenderer::cleanup() {
     texGaugeExHard.reset(); texGaugeHazard.reset(); texGaugeDan.reset();
     texKeys.reset();
     lane_Flame.reset(); lane_Flame2.reset();
-    tex_scratch.reset();
+    tex_scratch.reset(); tex_scratch_center.reset();
 
     for (auto& b : texBombs) b.reset();
     texBombs.clear();
@@ -290,7 +295,11 @@ void NoteRenderer::renderUI(SDL_Renderer* ren, const BMSHeader& header, int fps,
     }
 }
 
-void NoteRenderer::renderLanes(SDL_Renderer* ren, double progress) {
+// スクラッチ回転アニメーション用状態（ファイルスコープで慣性を保持）
+static double s_scratchAngle = 0.0;
+static double s_scratchSpeed = 0.0;
+
+void NoteRenderer::renderLanes(SDL_Renderer* ren, double progress, int scratchStatus) {
     int totalWidth = ll.totalWidth;
     int startX     = ll.baseX;
     int laneHeight = 482;
@@ -319,6 +328,16 @@ void NoteRenderer::renderLanes(SDL_Renderer* ren, double progress) {
             : (float)(startX + totalWidth - Config::SCRATCH_WIDTH);
         SDL_FRect rF = { fX, (float)Config::JUDGMENT_LINE_Y, fSize, fSize };
         SDL_RenderCopyExF(ren, tex_scratch.texture, NULL, &rF, 0.0, NULL, SDL_FLIP_NONE);
+
+        if (tex_scratch_center) {
+            // 慣性付き回転：入力に応じて目標速度に追従
+            double targetSpeed = (scratchStatus == 1) ? -5.0 : (scratchStatus == 2) ? 15.0 : 0.0;
+            s_scratchSpeed += (targetSpeed - s_scratchSpeed) * 0.1;
+            s_scratchAngle += s_scratchSpeed;
+            if (s_scratchAngle >= 360.0) s_scratchAngle -= 360.0;
+            if (s_scratchAngle <    0.0) s_scratchAngle += 360.0;
+            SDL_RenderCopyExF(ren, tex_scratch_center.texture, NULL, &rF, s_scratchAngle, NULL, SDL_FLIP_NONE);
+        }
     }
 
     if (texKeys) {
@@ -553,7 +572,9 @@ void NoteRenderer::renderGauge(SDL_Renderer* ren, double gaugeValue, int gaugeOp
 
         float segW  = (float)totalW / 50.0f;
         float sSegW = (float)target->w / 50.0f;
-        int activeS = std::clamp((int)gaugeValue, 0, 100) / 2;
+        // GAUGE_DISPLAY_TYPE==1: 2刻み偶数表示、それ以外: そのまま
+        int displayVal = std::clamp((int)gaugeValue, 0, 100);
+        int activeS = (Config::GAUGE_DISPLAY_TYPE == 1) ? ((displayVal / 2) * 2) / 2 : displayVal / 2;
         for (int i = 0; i < 50; i++) {
             if (i < activeS && (i == activeS - 1 || i < activeS - 4
                 || rand() % 100 < 50 || (SDL_GetTicks() / 60) % 2 == 0)) {
@@ -603,9 +624,26 @@ void NoteRenderer::renderResult(SDL_Renderer* ren, const PlayStatus& status,
     drawText(ren, "MAX COMBO : " + std::to_string(status.maxCombo),  680, sY,         yellow, false);
     drawText(ren, "EX SCORE  : " + std::to_string((status.pGreatCount * 2) + status.greatCount),
                   680, sY + sp, white, false);
+
+    // クリアタイプ表示
+    std::string clearText  = "FAILED";
+    SDL_Color   clearColor = {100, 100, 100, 255};
+    switch (status.clearType) {
+        case ClearType::FULL_COMBO:    clearText = "FULL COMBO";    clearColor = {255, 255, 255, 255}; break;
+        case ClearType::EX_HARD_CLEAR: clearText = "EX-HARD CLEAR"; clearColor = {255, 255,   0, 255}; break;
+        case ClearType::HARD_CLEAR:    clearText = "HARD CLEAR";    clearColor = {255,   0,   0, 255}; break;
+        case ClearType::NORMAL_CLEAR:  clearText = "NORMAL CLEAR";  clearColor = {  0, 200, 255, 255}; break;
+        case ClearType::EASY_CLEAR:    clearText = "EASY CLEAR";    clearColor = {150, 255, 100, 255}; break;
+        case ClearType::ASSIST_CLEAR:  clearText = "ASSIST CLEAR";  clearColor = {180, 100, 255, 255}; break;
+        case ClearType::DAN_CLEAR:     clearText = "DAN CLEAR";     clearColor = {200,   0, 100, 255}; break;
+        default: break;
+    }
+    drawTextCached(ren, clearText, 640, 550, clearColor, true, true);
+
     if ((SDL_GetTicks() / 500) % 2 == 0)
         drawTextCached(ren, "PRESS ANY BUTTON TO EXIT", 640, 650, {150, 150, 150, 255}, true, true);
 }
+
 
 
 

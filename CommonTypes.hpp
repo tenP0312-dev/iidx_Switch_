@@ -177,10 +177,9 @@ struct BestScore {
 //  動画フレーム
 // ============================================================
 struct VideoFrame {
-    double   pts  = -1.0;
-    uint8_t* yPtr = nullptr;    // memoryPool 内の固定位置を指すポインタ
-    uint8_t* uPtr = nullptr;    // NV12 の場合は UV インターリーブ済みのポインタ
-    uint8_t* vPtr = nullptr;
+    double   pts     = -1.0;
+    size_t   slotIdx = SIZE_MAX; // ★修正: データレース対策用スロット番号
+    uint8_t* yPtr    = nullptr;  // memoryPool 内の固定位置を指すポインタ
 
     int yStride = 0;
     int uStride = 0;
@@ -188,6 +187,8 @@ struct VideoFrame {
 };
 
 #endif // COMMONTYPES_HPP
+
+
 
 
 

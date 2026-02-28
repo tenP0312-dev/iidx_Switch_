@@ -63,6 +63,10 @@ private:
 
     bool isVideoMode         = false;
     bool hasNewFrameToUpload = false;
+    // ★修正③: メインスレッドブロッキング排除のための準備完了フラグ。
+    //          loadBgaFile() はデコードスレッドを起動して即座にreturnする。
+    //          render() はこのフラグが立つまで描画をスキップする。
+    std::atomic<bool> isReady{false};
 
     // 動画テクスチャのサイズも事前に保持する
     SDL_Texture* videoTexture = nullptr;
@@ -80,13 +84,22 @@ private:
     std::atomic<double>     sharedVideoElapsed{0.0};
 
     std::deque<VideoFrame>  frameQueue;
-    const size_t MAX_FRAME_QUEUE = 30;
+    static constexpr size_t MAX_FRAME_QUEUE = 60;
 
-    // メモリ断片化防止用固定プール
+    // ★修正: メモリプールは動画解像度確定後に loadBgaFile() で確保する
     std::vector<uint8_t> memoryPoolV;
+    size_t poolSlotSize = 0; // 1スロットのバイト数（worker/render で共有）
+
+    // ★修正: データレース対策
+    // render() が現在 memcpy 中のスロット番号を atomic で通知。
+    // worker は書き込み先がこの値と一致するとき待機してスキップする。
+    std::atomic<size_t> renderInUseSlot{SIZE_MAX};
 };
 
 #endif // BGAMANAGER_HPP
+
+
+
 
 
 

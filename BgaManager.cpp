@@ -11,12 +11,8 @@ static const long long BMP_LOOK_AHEAD = 300000;
 void BgaManager::init(size_t expectedSize) {
     clear();
     textures.reserve(std::min((size_t)256, expectedSize));
-
-    // 1280x720 NV12 * MAX_FRAME_QUEUE フレーム分を一括確保
-    int max_w = 1280;
-    int max_h = 720;
-    size_t nv12Size = (size_t)(max_w * max_h) + (size_t)(max_w * max_h / 2);
-    this->memoryPoolV.assign(nv12Size * MAX_FRAME_QUEUE, 0);
+    // ★修正: メモリプールは動画解像度が確定してから loadBgaFile() で確保する
+    // init() 時点では動画サイズ不明のため、ここでは確保しない
 }
 
 bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
@@ -76,8 +72,15 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
     videoTexW = pCodecCtx->width;
     videoTexH = pCodecCtx->height;
 
+    // ★修正: 実際の動画解像度でプールを確保する
+    // init() 時の 1280x720 固定サイズではなく、コーデックが確定したここで計算する。
+    // 解像度不一致によるバッファオーバーフローを防ぐ。
+    poolSlotSize = (size_t)(videoTexW * videoTexH) + (size_t)(videoTexW * videoTexH / 2);
+    memoryPoolV.assign(poolSlotSize * MAX_FRAME_QUEUE, 0);
+
     quitThread = false;
     isVideoMode = true;
+    isReady.store(false, std::memory_order_release); // ★修正③: 準備未完了状態でリセット
     {
         std::lock_guard<std::mutex> lock(frameMutex);
         frameQueue.clear();
@@ -85,27 +88,11 @@ bool BgaManager::loadBgaFile(const std::string& path, SDL_Renderer* renderer) {
     hasNewFrameToUpload = false;
     decodeThread = std::thread(&BgaManager::videoWorker, this);
 
-    // ★修正：ビジーウェイトを改善。
-    // 最大 2 秒間待つ旧実装から、キューが充填されるか上限時間に達したら抜ける実装に変更。
-    // ただしメインスレッドの長期ブロックは依然として問題があるため、
-    // 将来的にはコールバック or フラグ確認方式に移行すること。
-    const int MAX_WAIT_MS  = 1000; // 最大1秒に短縮
-    const int MIN_FRAMES   = 10;   // 最低限このフレーム数を待てば再生開始
-    int waitedMs = 0;
-    while (waitedMs < MAX_WAIT_MS) {
-        if (quitThread) break;
-
-        size_t currentSize = 0;
-        {
-            std::lock_guard<std::mutex> lock(frameMutex);
-            currentSize = frameQueue.size();
-        }
-        if (currentSize >= (size_t)MIN_FRAMES) break;
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        waitedMs += 10;
-    }
-
+    // ★修正③: メインスレッドのブロッキングを完全に排除。
+    // 旧実装は最大 1000ms スリープしていたが、Switch では appletMainLoop() が
+    // 呼ばれない状態が続きシステムイベントが処理されずフリーズに見えていた。
+    // isReady フラグは videoWorker が MIN_FRAMES 分バッファを溜めた時点でセットされ、
+    // render() 側でガードすることで BGA 描画が安全に開始される。
     return true;
 }
 
@@ -153,7 +140,8 @@ void BgaManager::videoWorker() {
 
     int w = pCodecCtx->width;
     int h = pCodecCtx->height;
-    size_t nv12Size = (size_t)(w * h) + (size_t)(w * h / 2);
+    // ★修正: プール確保時と同じ値を使うことでスロット境界を一致させる
+    size_t nv12Size = poolSlotSize;
 
     size_t writeIdx = 0;
 
@@ -168,6 +156,18 @@ void BgaManager::videoWorker() {
             continue;
         }
 
+        // ★修正: データレース対策
+        // render() が現在このスロットを memcpy 中であれば書き込みをスキップして待機する。
+        // writeIdx が renderInUseSlot と一致する間は次のスロットを試みる。
+        size_t safeWriteIdx = writeIdx;
+        {
+            int safety = 0;
+            while (safeWriteIdx == renderInUseSlot.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                if (++safety > 500) break; // 100ms タイムアウト（デッドロック防止）
+            }
+        }
+
         if (av_read_frame(pFormatCtx, &packet) >= 0) {
             if (packet.stream_index == videoStreamIdx) {
                 if (avcodec_send_packet(pCodecCtx, &packet) >= 0) {
@@ -179,9 +179,10 @@ void BgaManager::videoWorker() {
                         double frameTime = pts * av_q2d(pFormatCtx->streams[videoStreamIdx]->time_base);
 
                         VideoFrame vFrame;
-                        vFrame.pts  = frameTime;
+                        vFrame.pts     = frameTime;
+                        vFrame.slotIdx = safeWriteIdx; // ★修正: スロット番号を記録
 
-                        uint8_t* dstBase = &this->memoryPoolV[writeIdx * nv12Size];
+                        uint8_t* dstBase = &this->memoryPoolV[safeWriteIdx * nv12Size];
                         vFrame.yPtr = dstBase;
 
                         // Y面コピー
@@ -190,16 +191,13 @@ void BgaManager::videoWorker() {
                                    pFrame->data[0] + i * pFrame->linesize[0], w);
                         }
 
-                        // ★修正：UV面インターリーブを uint16_t で 2 バイト同時書き込みに変更。
-                        // 旧実装は 1 バイトずつ書いていたため、720p なら約 23 万回のバイト書き込みが発生。
-                        // uint16_t でまとめることでメモリアクセス回数を半減させ、キャッシュ効率を改善。
+                        // UV面インターリーブ (NV12): uint16_t で2バイト同時書き込み
                         uint8_t* dstUV = dstBase + (w * h);
                         for (int i = 0; i < h / 2; ++i) {
                             uint16_t* dUV16 = reinterpret_cast<uint16_t*>(dstUV + i * w);
                             const uint8_t* sU = pFrame->data[1] + i * pFrame->linesize[1];
                             const uint8_t* sV = pFrame->data[2] + i * pFrame->linesize[2];
                             for (int j = 0; j < w / 2; ++j) {
-                                // Little-endian: 下位バイト=U, 上位バイト=V
                                 dUV16[j] = (uint16_t)sU[j] | ((uint16_t)sV[j] << 8);
                             }
                         }
@@ -207,8 +205,12 @@ void BgaManager::videoWorker() {
                         {
                             std::lock_guard<std::mutex> lock(frameMutex);
                             frameQueue.push_back(vFrame);
+                            if (!isReady.load(std::memory_order_relaxed) && frameQueue.size() >= 10) {
+                                isReady.store(true, std::memory_order_release);
+                            }
                         }
-                        writeIdx = (writeIdx + 1) % MAX_FRAME_QUEUE;
+                        safeWriteIdx = (safeWriteIdx + 1) % MAX_FRAME_QUEUE;
+                        writeIdx     = safeWriteIdx; // 次ループの起点を更新
                     }
                 }
             }
@@ -220,6 +222,11 @@ void BgaManager::videoWorker() {
 }
 
 void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, int y, double cur_ms) {
+    // ★修正③: デコードスレッドが十分なフレームを蓄積するまで描画をスキップ。
+    //          これにより loadBgaFile() がメインスレッドをブロックせずとも、
+    //          未初期化のフレームバッファへのアクセスを防ぐ。
+    if (isVideoMode && !isReady.load(std::memory_order_acquire)) return;
+
     int sw = Config::SCRATCH_WIDTH;
     int lw = Config::LANE_WIDTH;
     int totalKeysWidth = 0;
@@ -272,6 +279,7 @@ void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, i
         // 最大30フレーム分のサイクルが必要 → memcpy中(数十μs)に
         // 上書きが追いつくことはなく、データ競合は発生しない。
         uint8_t* frameDataPtr = nullptr;
+        size_t   frameSlotIdx = SIZE_MAX;
         {
             std::lock_guard<std::mutex> lock(frameMutex);
             while (!frameQueue.empty()) {
@@ -281,22 +289,34 @@ void BgaManager::render(long long currentPulse, SDL_Renderer* renderer, int x, i
                     continue;
                 }
                 if (front.pts <= currentTime + 0.05) {
-                    frameDataPtr = front.yPtr; // ポインタだけ取得
-                    frameQueue.pop_front();    // ロック内でpop（所有権を手放す）
+                    frameDataPtr = front.yPtr;
+                    frameSlotIdx = front.slotIdx;
+                    frameQueue.pop_front();
                 }
                 break;
             }
-        } // ← ここでデコードスレッドのブロックが解除される
+        }
 
-        // memcpyはロック外で実行（デコードスレッドを止めない）
         if (frameDataPtr) {
+            // ★修正: memcpy 開始前にスロット番号を通知し、worker が上書きしないようにする
+            renderInUseSlot.store(frameSlotIdx, std::memory_order_release);
+
             void* pixels;
             int   pitch;
             if (SDL_LockTexture(videoTexture, NULL, &pixels, &pitch) == 0) {
-                size_t totalSize = (size_t)(videoTexW * videoTexH * 3) / 2;
-                memcpy(pixels, frameDataPtr, totalSize);
+                uint8_t* dst = (uint8_t*)pixels;
+                const uint8_t* src = frameDataPtr;
+                for (int row = 0; row < videoTexH; ++row)
+                    memcpy(dst + row * pitch, src + row * videoTexW, videoTexW);
+                uint8_t* dstUV = dst + pitch * videoTexH;
+                const uint8_t* srcUV = src + videoTexW * videoTexH;
+                for (int row = 0; row < videoTexH / 2; ++row)
+                    memcpy(dstUV + row * pitch, srcUV + row * videoTexW, videoTexW);
                 SDL_UnlockTexture(videoTexture);
             }
+
+            // ★修正: memcpy 完了後にスロット解放を通知
+            renderInUseSlot.store(SIZE_MAX, std::memory_order_release);
         }
         SDL_RenderCopy(renderer, videoTexture, NULL, &dst);
     } else {
@@ -338,12 +358,20 @@ void BgaManager::clear() {
 
     isVideoMode          = false;
     hasNewFrameToUpload  = false;
+    isReady.store(false, std::memory_order_release);
+    renderInUseSlot.store(SIZE_MAX, std::memory_order_release); // ★修正: スロット保護をリセット
     frameQueue.clear();
+    memoryPoolV.clear();
+    memoryPoolV.shrink_to_fit(); // ★修正: 実際にメモリを解放する（次の loadBgaFile で再確保）
+    poolSlotSize = 0;
     currentEventIndex = 0; currentLayerIndex = 0; currentPoorIndex = 0;
     lastDisplayedId   = -1; lastLayerId = -1; lastPoorId = -1;
 }
 
 void BgaManager::cleanup() { clear(); }
+
+
+
 
 
 

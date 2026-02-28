@@ -82,7 +82,7 @@ public:
                     double cur_ms, double speed, bool isAuto = false);
 
     void renderBackground(SDL_Renderer* ren);
-    void renderLanes(SDL_Renderer* ren, double progress);
+    void renderLanes(SDL_Renderer* ren, double progress, int scratchStatus = 0);
     void renderBeatLine(SDL_Renderer* ren, double diff, double speed);
     void renderHitEffect(SDL_Renderer* ren, int lane, float progress);
     void renderBomb(SDL_Renderer* ren, int lane, int frame);
@@ -105,6 +105,12 @@ public:
                        const std::string& filename);
     void renderResult(SDL_Renderer* ren, const PlayStatus& status,
                       const BMSHeader& header, const std::string& rank);
+
+    // ★修正⑥: ScenePlay::renderScene 等で重複計算されていたレーン座標を
+    //           ll キャッシュ経由で公開。rebuildLaneLayout() と二重管理になるバグを防ぐ。
+    int getLaneBaseX()      const { return ll.baseX; }
+    int getLaneTotalWidth() const { return ll.totalWidth; }
+    int getLaneCenterX()    const { return ll.baseX + ll.totalWidth / 2; }
 
 private:
     TTF_Font* fontSmall = nullptr;
@@ -137,7 +143,7 @@ private:
     TextureRegion texLaneCover;
     TextureRegion texGaugeAssist, texGaugeNormal, texGaugeHard,
                   texGaugeExHard, texGaugeHazard, texGaugeDan;
-    TextureRegion texKeys, tex_scratch;
+    TextureRegion texKeys, tex_scratch, tex_scratch_center;
 
     void loadAndCache(SDL_Renderer* ren, TextureRegion& region, const std::string& path);
 
@@ -154,6 +160,7 @@ private:
 };
 
 #endif // NOTERENDERER_HPP
+
 
 
 

@@ -20,7 +20,7 @@ static double get_double_safe_internal(const nlohmann::json& j, const std::strin
     return default_val;
 }
 
-bool isPlayableLaneSP(int64_t x) {
+static bool isPlayableLaneSP(int64_t x) {
     return (x >= 1 && x <= 8);
 }
 
@@ -178,20 +178,108 @@ BMSData BmsonLoader::load(const std::string& path, std::function<void(float)> on
     return data;
 }
 
-// 指摘事項：ヘッダーロード時も同様に即座にメモリを解放
-BMSHeader BmsonLoader::loadHeader(const std::string& path) {
-    BMSData temp_data;
-    std::ifstream f(path);
-    if (!f.is_open()) return temp_data.header;
-    try {
-        {
-            nlohmann::json j;
-            f >> j;
-            parse_bmson_internal(j, temp_data, path, nullptr);
-        } // ここで解放
-    } catch (...) {}
-    return temp_data.header;
+// ★修正⑤: ヘッダーのみの高速パース。選曲画面のリスト表示用。
+// 旧実装は parse_bmson_internal を呼び出し、数千ノーツの sound_channels を全構築してから
+// header だけを返していた。曲数×フルパースは起動時間の数十秒増加につながる。
+// この関数は "info" セクションと "bpm_events" のみ読み込み、sound_channels は一切触れない。
+static BMSHeader parse_bmson_header_only(const nlohmann::json& j, const std::string& path) {
+    BMSHeader h;
+    const nlohmann::json& info = (j.contains("info") && !j["info"].is_null()) ? j["info"] : j;
+
+    h.title    = get_string_safe_internal(info, "title",    "Unknown");
+    h.artist   = get_string_safe_internal(info, "artist",   "Unknown");
+    h.genre    = get_string_safe_internal(info, "genre",    "Unknown");
+    h.modeHint = get_string_safe_internal(info, "mode_hint","");
+    h.subtitle = get_string_safe_internal(info, "subtitle", "");
+    h.eyecatch = get_string_safe_internal(info, "eyecatch_image", "");
+    h.banner   = get_string_safe_internal(info, "banner_image",   "");
+    h.preview  = get_string_safe_internal(info, "preview_music",  "");
+
+    std::string cn = get_string_safe_internal(info, "chart_name", "");
+    int diffVal = (int)get_double_safe_internal(info, "difficulty", -1.0);
+    if (!cn.empty()) {
+        std::string s = cn;
+        std::transform(s.begin(), s.end(), s.begin(), ::toupper);
+        if      (s.find("BEGINNER")   != std::string::npos) diffVal = 1;
+        else if (s.find("NORMAL")     != std::string::npos) diffVal = 2;
+        else if (s.find("HYPER")      != std::string::npos) diffVal = 3;
+        else if (s.find("ANOTHER")    != std::string::npos) diffVal = 4;
+        else if (s.find("INSANE")     != std::string::npos ||
+                 s.find("LEGENDARIA") != std::string::npos ||
+                 s.find("LEGGENDARIA")!= std::string::npos) diffVal = 5;
+    }
+    if (diffVal == -1) diffVal = 2;
+    switch (diffVal) {
+        case 1: h.chartName = "BEGINNER"; break;
+        case 3: h.chartName = "HYPER";    break;
+        case 4: h.chartName = "ANOTHER";  break;
+        case 5: h.chartName = "INSANE";   break;
+        default: h.chartName = "NORMAL";  break;
+    }
+
+    h.level     = (int)get_double_safe_internal(info, "level",      0.0);
+    h.total     = get_double_safe_internal(info, "total",      100.0);
+    h.judgeRank = get_double_safe_internal(info, "judge_rank", 100.0);
+    h.resolution= (int)get_double_safe_internal(info, "resolution", 480.0);
+
+    double bpm = get_double_safe_internal(info, "bpm", -1.0);
+    if (bpm <= 0) bpm = get_double_safe_internal(info, "init_bpm", -1.0);
+    if (bpm <= 0) bpm = get_double_safe_internal(j,    "bpm",      -1.0);
+    if (bpm <= 0) bpm = get_double_safe_internal(j,    "init_bpm", 120.0);
+    h.bpm = h.min_bpm = h.max_bpm = bpm;
+
+    // BPM 変化幅だけ取得（ノーツは不要）
+    const nlohmann::json& bpm_src = j.contains("bpm_events") ? j["bpm_events"]
+                                  : (info.contains("bpm_events") ? info["bpm_events"]
+                                                                  : nlohmann::json());
+    if (bpm_src.is_array()) {
+        for (const auto& e : bpm_src) {
+            double b = get_double_safe_internal(e, "bpm", bpm);
+            if (b < h.min_bpm) h.min_bpm = b;
+            if (b > h.max_bpm) h.max_bpm = b;
+        }
+    }
+
+    // is7Key と totalNotes の確定のために x 値だけスキャンする。
+    // BMSSoundChannel / BMSNote オブジェクトは一切生成しないため、
+    // フルパースと比べてアロケーション量は大幅に少ない。
+    bool hasP1_6or7 = false;
+    bool hasP2Side  = false;
+    int  totalNotesCount = 0;
+    const nlohmann::json& sc_src = j.contains("sound_channels") ? j["sound_channels"]
+                                 : (info.contains("sound_channels") ? info["sound_channels"]
+                                                                    : nlohmann::json());
+    if (sc_src.is_array()) {
+        for (const auto& ch : sc_src) {
+            if (ch.contains("notes") && ch["notes"].is_array()) {
+                for (const auto& n : ch["notes"]) {
+                    int64_t x = n.value("x", (int64_t)0);
+                    if (x == 6 || x == 7)          hasP1_6or7 = true;
+                    if (x >= 9 && x <= 16)          hasP2Side  = true;
+                    if (isPlayableLaneSP(x))        totalNotesCount++;
+                }
+            }
+        }
+    }
+    h.is7Key     = (hasP1_6or7 && !hasP2Side);
+    h.totalNotes = totalNotesCount;
+    h.total      = (double)totalNotesCount;
+
+    return h;
 }
+
+BMSHeader BmsonLoader::loadHeader(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return BMSHeader{};
+    try {
+        // ★修正⑤: スコープを絞って JSON を即破棄。sound_channels は一切構築しない。
+        nlohmann::json j;
+        f >> j;
+        return parse_bmson_header_only(j, path);
+    } catch (...) {}
+    return BMSHeader{};
+}
+
 
 
 

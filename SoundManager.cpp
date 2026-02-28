@@ -246,11 +246,11 @@ void SoundManager::clear() {
     currentTotalMemory = 0;
     sounds.reserve(4000);
 
-    // Switch向けメモリ断片化対策：音声サブシステムをリセット
-    Mix_CloseAudio();
-    if (Mix_OpenAudio(22050, MIX_DEFAULT_FORMAT, 1, 512) < 0) {
-        std::cerr << "Mix_OpenAudio Error during clear: " << Mix_GetError() << std::endl;
-    }
+    // ★修正: Mix_CloseAudio()/Mix_OpenAudio() を廃止する。
+    // Switch では OpenAudio の再呼び出しがドライバ側の解放完了前に実行されると
+    // -1 を返し、以降の Mix_PlayChannel が全て失敗して 2曲目以降が無音になる。
+    // オーディオデバイスはアプリ起動から終了まで開きっぱなしにし、
+    // チャンネルの再割り当てだけ行えば十分。
     Mix_AllocateChannels(256);
 }
 
@@ -258,6 +258,8 @@ void SoundManager::cleanup() {
     clear();
     Mix_CloseAudio();
 }
+
+
 
 
 
